@@ -17,7 +17,12 @@ let state = {
   checklist: {},
   riskViewMode: 'group',
   compareMode: false,
-  selectedFavorites: []
+  selectedFavorites: [],
+  compareWeights: {
+    risk: 50,
+    commute: 30,
+    budget: 20
+  }
 };
 
 const VIEWING_CHECKLIST = [
@@ -67,14 +72,21 @@ async function loadState() {
     state.reminders = resp.data.reminders || [];
     state.annotations = resp.data.annotations || {};
     
-    const savedChecklist = await chrome.storage.local.get('checklist');
-    state.checklist = savedChecklist.checklist || {};
+    const saved = await chrome.storage.local.get(['checklist', 'compareWeights']);
+    state.checklist = saved.checklist || {};
+    if (saved.compareWeights) {
+      state.compareWeights = { ...state.compareWeights, ...saved.compareWeights };
+    }
   }
   renderAll();
 }
 
 function saveChecklist() {
   chrome.storage.local.set({ checklist: state.checklist });
+}
+
+function saveCompareWeights() {
+  chrome.storage.local.set({ compareWeights: state.compareWeights });
 }
 
 function renderAll() {
@@ -575,6 +587,134 @@ function closeModal() {
   document.getElementById('modal').classList.remove('open');
 }
 
+function calculateDecision({ fav, risks, comms, annotation }) {
+  const reasons = [];
+  let score = 50;
+
+  const highRisks = risks.filter(r => r.level === 'high' && !r.resolved);
+  const mediumRisks = risks.filter(r => r.level === 'medium' && !r.resolved);
+
+  if (highRisks.length >= 2) {
+    score -= 25;
+    reasons.push({ type: 'risk', text: `存在 ${highRisks.length} 项高风险未解决`, weight: '强负' });
+  } else if (highRisks.length === 1) {
+    score -= 15;
+    reasons.push({ type: 'risk', text: `存在高风险：${highRisks[0].title}`, weight: '负' });
+  }
+
+  if (mediumRisks.length >= 3) {
+    score -= 15;
+    reasons.push({ type: 'risk', text: `存在 ${mediumRisks.length} 项中风险`, weight: '负' });
+  } else if (mediumRisks.length > 0) {
+    score -= 5;
+    reasons.push({ type: 'risk', text: `存在 ${mediumRisks.length} 项中风险`, weight: '弱负' });
+  }
+
+  if (risks.filter(r => r.resolved).length > 0 && highRisks.length === 0) {
+    score += 3;
+    reasons.push({ type: 'risk', text: `历史风险已处理 ${risks.filter(r => r.resolved).length} 项`, weight: '弱正' });
+  }
+
+  const commuteMins = fav ? extractCommuteMinutes(fav.commute) : null;
+  if (commuteMins !== null) {
+    if (commuteMins <= 30) {
+      score += 10;
+      reasons.push({ type: 'commute', text: `通勤仅 ${commuteMins} 分钟，很便利`, weight: '正' });
+    } else if (commuteMins <= 45) {
+      score += 4;
+      reasons.push({ type: 'commute', text: `通勤 ${commuteMins} 分钟，在可接受范围`, weight: '弱正' });
+    } else if (commuteMins > 60) {
+      score -= 8;
+      reasons.push({ type: 'commute', text: `通勤超过 ${commuteMins} 分钟，时间成本较高`, weight: '负' });
+    }
+  }
+
+  const budgetVal = fav ? extractPriceValue(fav.budget) : null;
+  if (budgetVal !== null) {
+    if (budgetVal <= 2500) {
+      score += 8;
+      reasons.push({ type: 'budget', text: `预算偏低 (约${budgetVal}元)，经济友好`, weight: '正' });
+    } else if (budgetVal <= 4000) {
+      score += 4;
+      reasons.push({ type: 'budget', text: `预算适中 (约${budgetVal}元)`, weight: '弱正' });
+    } else if (budgetVal > 6000) {
+      score -= 5;
+      reasons.push({ type: 'budget', text: `预算偏高 (约${budgetVal}元)，经济压力大`, weight: '弱负' });
+    }
+  }
+
+  if (annotation.price && fav && fav.budget) {
+    const price = extractPriceValue(annotation.price);
+    const budget = extractPriceValue(fav.budget);
+    if (price && budget) {
+      if (price > budget * 1.2) {
+        score -= 8;
+        reasons.push({ type: 'budget', text: `标价超出预算约 ${Math.round((price / budget - 1) * 100)}%`, weight: '负' });
+      } else if (price <= budget) {
+        score += 5;
+        reasons.push({ type: 'budget', text: `标价在预算范围内`, weight: '弱正' });
+      }
+    }
+  }
+
+  const promisesAll = comms.map(c => c.promises).filter(Boolean);
+  if (promisesAll.length > 0) {
+    score += 3;
+    reasons.push({ type: 'comm', text: `已有 ${promisesAll.length} 份沟通承诺记录在案`, weight: '弱正' });
+  }
+
+  const brokenKeywords = ['不退还', '不退', '口头', '随时', '无合同', '不签'];
+  const brokenPromises = [];
+  promisesAll.forEach(p => {
+    brokenKeywords.forEach(kw => {
+      if (p.includes(kw)) brokenPromises.push(kw);
+    });
+  });
+  if (brokenPromises.length > 0) {
+    score -= 10;
+    reasons.push({ type: 'comm', text: `沟通中出现风险表述 (${brokenPromises.slice(0, 3).join('、')})`, weight: '负' });
+  }
+
+  const appointmentTimes = comms
+    .filter(c => c.appointmentTime)
+    .map(c => new Date(c.appointmentTime).getTime());
+  if (appointmentTimes.length > 0) {
+    appointmentTimes.sort();
+    const next = appointmentTimes.find(t => t > Date.now());
+    if (next) {
+      score += 2;
+      reasons.push({ type: 'appt', text: `已约看房：${formatDate(next)}`, weight: '弱正' });
+    }
+  }
+
+  if (fav && fav.status === '已签约') {
+    score = Math.min(95, score + 10);
+    reasons.push({ type: 'status', text: `状态：已签约`, weight: '正' });
+  } else if (fav && fav.status === '已放弃') {
+    score = Math.max(5, score - 20);
+    reasons.push({ type: 'status', text: `状态：已放弃`, weight: '强负' });
+  }
+
+  score = Math.max(0, Math.min(100, score));
+
+  let recommendation, recColor, recIcon;
+  if (score >= 70) {
+    recommendation = '继续联系';
+    recColor = 'success';
+    recIcon = '✅';
+  } else if (score >= 45) {
+    recommendation = '谨慎观望';
+    recColor = 'warning';
+    recIcon = '⚠️';
+  } else {
+    recommendation = '建议放弃';
+    recColor = 'danger';
+    recIcon = '🚫';
+  }
+
+  return { score, recommendation, recColor, recIcon, reasons };
+}
+
 function showPropertyDetail(url) {
   const fav = getFavoriteByUrl(url);
   const risks = state.risks.filter(r => r.url === url);
@@ -592,30 +732,101 @@ function showPropertyDetail(url) {
 
   const title = fav ? fav.title : truncateUrl(url);
   const levelLabel = { high: '高风险', medium: '中风险', low: '低风险' };
+  const decision = calculateDecision({ fav, risks, comms, annotation });
+  const decisionReasonsByType = {
+    risk: decision.reasons.filter(r => r.type === 'risk'),
+    budget: decision.reasons.filter(r => r.type === 'budget'),
+    commute: decision.reasons.filter(r => r.type === 'commute'),
+    comm: decision.reasons.filter(r => r.type === 'comm'),
+    appt: decision.reasons.filter(r => r.type === 'appt'),
+    status: decision.reasons.filter(r => r.type === 'status')
+  };
+  const weightLabels = { '强正': '++', '正': '+', '弱正': '⊕', '弱负': '⊖', '负': '-', '强负': '--' };
+  const weightColors = { '强正': '#27ae60', '正': '#2ecc71', '弱正': '#27ae60', '弱负': '#f39c12', '负': '#e67e22', '强负': '#e74c3c' };
 
   const html = `
     <div class="property-detail">
       <div class="prop-detail-header">
         <div class="prop-detail-title">🏠 ${escapeHtml(title)}</div>
-        ${fav ? `<div class="prop-detail-status">${escapeHtml(fav.status || '收藏中')}</div>` : ''}
+        <div style="display:flex;align-items:center;gap:8px">
+          <button class="btn btn-sm btn-ghost" data-action="export-summary" data-url="${escapeHtml(url)}">📄 导出摘要</button>
+          ${fav ? `<div class="prop-detail-status">${escapeHtml(fav.status || '收藏中')}</div>` : ''}
+        </div>
       </div>
       
       <div class="prop-tabs">
-        <button class="prop-tab active" data-prop-tab="risks">
+        <button class="prop-tab active" data-prop-tab="decision">
+          🧭 决策
+        </button>
+        <button class="prop-tab" data-prop-tab="risks">
           风险 (${risks.filter(r => !r.resolved).length}/${risks.length})
         </button>
         <button class="prop-tab" data-prop-tab="annotation">
-          页面标注
+          标注
         </button>
         <button class="prop-tab" data-prop-tab="comms">
-          沟通记录 (${comms.length})
+          沟通 (${comms.length})
         </button>
         <button class="prop-tab" data-prop-tab="reminders">
           提醒 (${reminders.length})
         </button>
       </div>
 
-      <div class="prop-tab-content active" data-prop-tab-content="risks">
+      <div class="prop-tab-content active" data-prop-tab-content="decision">
+        <div class="decision-card color-${decision.recColor}">
+          <div class="decision-header">
+            <div class="decision-icon">${decision.recIcon}</div>
+            <div class="decision-info">
+              <div class="decision-rec">${decision.recommendation}</div>
+              <div class="decision-sub">综合评分 ${decision.score}/100</div>
+            </div>
+          </div>
+          <div class="decision-bar">
+            <div class="decision-bar-fill" style="width:${decision.score}%;background:${decision.recColor === 'success' ? '#27ae60' : decision.recColor === 'warning' ? '#f39c12' : '#e74c3c'}"></div>
+          </div>
+        </div>
+        <div class="decision-section">
+          <div class="decision-section-title">📊 判断依据</div>
+          ${decision.reasons.length === 0 ? `
+            <div class="prop-empty" style="padding:20px 0">信息不足，建议完善风险记录和房源信息</div>
+          ` : `
+            ${Object.entries(decisionReasonsByType).filter(([k, v]) => v.length > 0).map(([type, items]) => `
+              <div class="decision-reason-group">
+                <div class="decision-reason-type">
+                  ${type === 'risk' ? '⚠️ 风险' : type === 'budget' ? '💰 预算' : type === 'commute' ? '🚇 通勤' : type === 'comm' ? '💬 沟通' : type === 'appt' ? '📅 约看' : '📋 状态'}
+                </div>
+                ${items.map(r => `
+                  <div class="decision-reason-item">
+                    <span class="decision-weight" style="color:${weightColors[r.weight]}" title="${r.weight}">${weightLabels[r.weight]}</span>
+                    <span class="decision-reason-text">${r.text}</span>
+                  </div>
+                `).join('')}
+              </div>
+            `).join('')}
+          `}
+        </div>
+        <div class="decision-section">
+          <div class="decision-section-title">💡 下一步建议</div>
+          <div class="decision-suggestions">
+            ${decision.score >= 70 ? `
+              <div class="suggest-item">✔️ 建议继续跟进，尽快安排实地看房</div>
+              <div class="suggest-item">✔️ 确认约看时间，准备看房问题清单</div>
+              ${!comms.some(c => c.appointmentTime) ? `<div class="suggest-item">📌 尽快沟通确认约看时间</div>` : ''}
+            ` : decision.score >= 45 ? `
+              <div class="suggest-item">⚠️ 建议谨慎对待，先核实关键风险点</div>
+              ${risks.filter(r => !r.resolved).length > 0 ? `<div class="suggest-item">📌 优先处理：${risks.filter(r => !r.resolved)[0].title}</div>` : ''}
+              <div class="suggest-item">💡 多沟通多对比，不要急于决策</div>
+            ` : `
+              <div class="suggest-item">🚫 存在较多风险，建议慎重考虑</div>
+              <div class="suggest-item">📌 高风险项需逐一核实或回避</div>
+              ${risks.some(r => r.level === 'high' && !r.resolved) ? `<div class="suggest-item">⚠️ 已发现高风险：${risks.filter(r => r.level === 'high' && !r.resolved).map(r => r.title).join('、')}</div>` : ''}
+              <div class="suggest-item">💡 可在收藏中标记为「已放弃」</div>
+            `}
+          </div>
+        </div>
+      </div>
+
+      <div class="prop-tab-content" data-prop-tab-content="risks">
         ${risks.length === 0 ? `
           <div class="prop-empty">暂无风险记录</div>
         ` : risks.map(r => `
@@ -732,7 +943,42 @@ function showCompareView() {
   const selected = state.favorites.filter(f => state.selectedFavorites.includes(f.id));
   if (selected.length < 2) return;
 
-  let sortBy = 'risk';
+  let sortBy = 'score';
+  const localWeights = { ...state.compareWeights };
+
+  function calcScore(fav) {
+    const riskCount = getRiskCount(fav.url);
+    const commute = extractCommuteMinutes(fav.commute);
+    const budget = extractPriceValue(fav.budget);
+
+    const maxRisk = 5;
+    const riskScore = Math.max(0, 100 - (riskCount / maxRisk) * 100);
+
+    let commuteScore = 50;
+    if (commute !== null) {
+      if (commute <= 15) commuteScore = 100;
+      else if (commute <= 30) commuteScore = 85;
+      else if (commute <= 45) commuteScore = 65;
+      else if (commute <= 60) commuteScore = 45;
+      else commuteScore = Math.max(0, 40 - (commute - 60));
+    }
+
+    let budgetScore = 50;
+    if (budget !== null) {
+      if (budget <= 1500) budgetScore = 95;
+      else if (budget <= 2500) budgetScore = 85;
+      else if (budget <= 4000) budgetScore = 70;
+      else if (budget <= 6000) budgetScore = 50;
+      else budgetScore = Math.max(0, 50 - (budget - 6000) / 200);
+    }
+
+    const totalWeight = localWeights.risk + localWeights.commute + localWeights.budget;
+    const wRisk = localWeights.risk / totalWeight;
+    const wComm = localWeights.commute / totalWeight;
+    const wBudget = localWeights.budget / totalWeight;
+
+    return Math.round(riskScore * wRisk + commuteScore * wComm + budgetScore * wBudget);
+  }
 
   function buildTable() {
     const sorted = [...selected];
@@ -742,6 +988,8 @@ function showCompareView() {
       sorted.sort((a, b) => (extractCommuteMinutes(a.commute) || 9999) - (extractCommuteMinutes(b.commute) || 9999));
     } else if (sortBy === 'budget') {
       sorted.sort((a, b) => (extractPriceValue(a.budget) || 99999) - (extractPriceValue(b.budget) || 99999));
+    } else {
+      sorted.sort((a, b) => calcScore(b) - calcScore(a));
     }
 
     return `
@@ -753,6 +1001,14 @@ function showCompareView() {
           </tr>
         </thead>
         <tbody>
+          <tr class="compare-row-score">
+            <td class="compare-label">🏆 综合评分</td>
+            ${sorted.map(f => {
+              const s = calcScore(f);
+              const color = s >= 70 ? '#27ae60' : s >= 45 ? '#f39c12' : '#e74c3c';
+              return `<td><b style="color:${color};font-size:14px">${s}</b> <span style="font-size:10px;color:#999">/ 100</span></td>`;
+            }).join('')}
+          </tr>
           <tr>
             <td class="compare-label">💰 预算</td>
             ${sorted.map(f => `<td>${escapeHtml(f.budget || '-')}</td>`).join('')}
@@ -787,8 +1043,40 @@ function showCompareView() {
             <td class="compare-label">📝 备注</td>
             ${sorted.map(f => `<td>${escapeHtml((f.notes || '').substring(0, 30)) || '-'}</td>`).join('')}
           </tr>
+          <tr>
+            <td class="compare-label">🖇️ 操作</td>
+            ${sorted.map(f => `<td><button class="btn btn-sm btn-ghost" data-action="view-fav-detail" data-id="${f.id}" data-close-after="1">查看详情</button></td>`).join('')}
+          </tr>
         </tbody>
       </table>
+    `;
+  }
+
+  function buildWeightPanel() {
+    const total = localWeights.risk + localWeights.commute + localWeights.budget;
+    return `
+      <div class="weight-panel">
+        <div class="weight-title">⚖️ 自定义偏好权重 (总分 ${total})</div>
+        <div class="weight-row">
+          <span class="weight-label">低风险</span>
+          <input type="range" min="0" max="100" value="${localWeights.risk}" data-weight="risk">
+          <span class="weight-value" data-weight-val="risk">${localWeights.risk}</span>
+        </div>
+        <div class="weight-row">
+          <span class="weight-label">短通勤</span>
+          <input type="range" min="0" max="100" value="${localWeights.commute}" data-weight="commute">
+          <span class="weight-value" data-weight-val="commute">${localWeights.commute}</span>
+        </div>
+        <div class="weight-row">
+          <span class="weight-label">低预算</span>
+          <input type="range" min="0" max="100" value="${localWeights.budget}" data-weight="budget">
+          <span class="weight-value" data-weight-val="budget">${localWeights.budget}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:8px">
+          <button class="btn btn-sm btn-ghost" id="resetWeights">重置为默认</button>
+          <button class="btn btn-sm" id="saveWeights">💾 保存偏好</button>
+        </div>
+      </div>
     `;
   }
 
@@ -805,6 +1093,36 @@ function showCompareView() {
 
   function rerender() {
     document.getElementById('compareTableContainer').innerHTML = buildTable();
+    bindTableActions();
+    updateSortButtons();
+  }
+
+  function rerenderAll() {
+    document.getElementById('compareTableContainer').innerHTML = buildTable();
+    updateSortButtons();
+  }
+
+  function updateSortButtons() {
+    content.querySelectorAll('[data-sort]').forEach(b => {
+      b.classList.remove('btn-primary');
+      b.classList.add('btn-ghost');
+    });
+    const active = content.querySelector(`[data-sort="${sortBy}"]`);
+    if (active) {
+      active.classList.remove('btn-ghost');
+      active.classList.add('btn-primary');
+    }
+  }
+
+  function bindTableActions() {
+    content.querySelectorAll('[data-action="view-fav-detail"][data-close-after="1"]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.id;
+        const fav = state.favorites.find(f => f.id === id);
+        closeModal();
+        if (fav && fav.url) setTimeout(() => showPropertyDetail(fav.url), 50);
+      });
+    });
   }
 
   const modal = document.getElementById('modal');
@@ -816,30 +1134,209 @@ function showCompareView() {
     </div>
     <div class="modal-body modal-body-large">
       <div class="compare-toolbar">
-        <span>排序方式：</span>
+        <span>排序：</span>
         <div class="compare-sort-btns">
-          <button class="btn btn-sm ${sortBy === 'risk' ? 'btn-primary' : 'btn-ghost'}" data-sort="risk">风险最少</button>
-          <button class="btn btn-sm ${sortBy === 'commute' ? 'btn-primary' : 'btn-ghost'}" data-sort="commute">通勤最短</button>
-          <button class="btn btn-sm ${sortBy === 'budget' ? 'btn-primary' : 'btn-ghost'}" data-sort="budget">预算最低</button>
+          <button class="btn btn-sm btn-primary" data-sort="score">🏆 综合推荐</button>
+          <button class="btn btn-sm btn-ghost" data-sort="risk">风险最少</button>
+          <button class="btn btn-sm btn-ghost" data-sort="commute">通勤最短</button>
+          <button class="btn btn-sm btn-ghost" data-sort="budget">预算最低</button>
         </div>
       </div>
+      ${buildWeightPanel()}
       <div id="compareTableContainer">${buildTable()}</div>
     </div>
   `;
   modal.classList.add('open', 'compare-modal');
 
+  bindTableActions();
+
   content.querySelectorAll('[data-sort]').forEach(btn => {
     btn.addEventListener('click', () => {
       sortBy = btn.dataset.sort;
-      content.querySelectorAll('[data-sort]').forEach(b => {
-        b.classList.remove('btn-primary');
-        b.classList.add('btn-ghost');
-      });
-      btn.classList.remove('btn-ghost');
-      btn.classList.add('btn-primary');
-      rerender();
+      rerenderAll();
     });
   });
+
+  content.querySelectorAll('[data-weight]').forEach(input => {
+    input.addEventListener('input', () => {
+      const key = input.dataset.weight;
+      localWeights[key] = parseInt(input.value);
+      const valEl = content.querySelector(`[data-weight-val="${key}"]`);
+      if (valEl) valEl.textContent = localWeights[key];
+      
+      const totalEl = content.querySelector('.weight-title');
+      const total = localWeights.risk + localWeights.commute + localWeights.budget;
+      if (totalEl) totalEl.textContent = `⚖️ 自定义偏好权重 (总分 ${total})`;
+
+      if (sortBy === 'score') rerender();
+    });
+  });
+
+  const resetBtn = document.getElementById('resetWeights');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', () => {
+      localWeights.risk = 50;
+      localWeights.commute = 30;
+      localWeights.budget = 20;
+      content.querySelectorAll('[data-weight]').forEach(input => {
+        input.value = localWeights[input.dataset.weight];
+        const valEl = content.querySelector(`[data-weight-val="${input.dataset.weight}"]`);
+        if (valEl) valEl.textContent = localWeights[input.dataset.weight];
+      });
+      const totalEl = content.querySelector('.weight-title');
+      if (totalEl) totalEl.textContent = '⚖️ 自定义偏好权重 (总分 100)';
+      if (sortBy === 'score') rerender();
+    });
+  }
+
+  const saveBtn = document.getElementById('saveWeights');
+  if (saveBtn) {
+    saveBtn.addEventListener('click', () => {
+      state.compareWeights = { ...localWeights };
+      saveCompareWeights();
+      saveBtn.textContent = '✓ 已保存';
+      setTimeout(() => { saveBtn.textContent = '💾 保存偏好'; }, 1500);
+    });
+  }
+}
+
+function exportViewingSummary(url) {
+  const fav = getFavoriteByUrl(url);
+  const risks = state.risks.filter(r => r.url === url);
+  const comms = state.communications.filter(c => {
+    if (fav && c.favoriteId === fav.id) return true;
+    const cfav = state.favorites.find(f => f.id === c.favoriteId);
+    return cfav && (cfav.url === url || cfav.normUrl === url);
+  });
+  const annotation = state.annotations[url] || {};
+  const decision = calculateDecision({ fav, risks, comms, annotation });
+
+  const lines = [];
+  lines.push('═══════════════════════════════════════');
+  lines.push('          🏠 看房前检查摘要          ');
+  lines.push('═══════════════════════════════════════');
+  lines.push('');
+  lines.push(`【房源名称】${fav ? fav.title : truncateUrl(url)}`);
+  if (fav) {
+    lines.push(`【房源链接】${fav.url || url}`);
+    if (fav.city) lines.push(`【所在城市】${fav.city}`);
+    if (fav.status) lines.push(`【当前状态】${fav.status}`);
+  } else {
+    lines.push(`【房源链接】${url}`);
+  }
+  if (fav && fav.budget) lines.push(`【预算范围】${fav.budget}`);
+  if (fav && fav.commute) lines.push(`【通勤情况】${fav.commute}`);
+  lines.push('');
+
+  lines.push('───────────────────────────────────────');
+  lines.push(`🧭 决策建议：${decision.recIcon} ${decision.recommendation} (${decision.score}/100)`);
+  lines.push('───────────────────────────────────────');
+  lines.push('');
+
+  const levelLabel = { high: '高风险', medium: '中风险', low: '低风险' };
+  const unresolvedRisks = risks.filter(r => !r.resolved);
+  lines.push(`【⚠️ 风险清单】未解决 ${unresolvedRisks.length} / 总计 ${risks.length}`);
+  if (unresolvedRisks.length > 0) {
+    unresolvedRisks.forEach((r, i) => {
+      lines.push(`  ${i + 1}. [${levelLabel[r.level] || '未知'}] ${r.title}`);
+      if (r.sources && r.sources.length > 0) {
+        lines.push(`     来源：${r.sources.join('、')}`);
+      }
+      if (r.details && r.details.length > 0) {
+        r.details.forEach(d => lines.push(`     · ${d}`));
+      }
+    });
+  } else {
+    lines.push('  ✅ 暂无未解决风险');
+  }
+  lines.push('');
+
+  const hasAnnotation = annotation.price || annotation.deposit || annotation.paymentCycle ||
+    annotation.agencyFee || annotation.landlordIdentity || annotation.viewingMethod || annotation.contractTerms;
+  lines.push('【📝 页面标注】');
+  if (hasAnnotation) {
+    const labels = {
+      price: '租金价格', deposit: '押金',
+      paymentCycle: '付款周期', agencyFee: '中介费',
+      landlordIdentity: '房东身份', viewingMethod: '看房方式',
+      contractTerms: '合同条款'
+    };
+    Object.keys(labels).forEach(k => {
+      if (annotation[k]) lines.push(`  · ${labels[k]}：${annotation[k]}`);
+    });
+  } else {
+    lines.push('  （暂无标注）');
+  }
+  lines.push('');
+
+  lines.push(`【💬 沟通记录】共 ${comms.length} 条`);
+  if (comms.length > 0) {
+    comms.forEach((c, i) => {
+      lines.push(`  ${i + 1}. ${c.contact ? '【' + c.contact + '】' : ''} ${formatDate(c.createdAt)}`);
+      if (c.keyPoints) lines.push(`     📝 要点：${c.keyPoints.replace(/\n/g, ' / ')}`);
+      if (c.promises) lines.push(`     🤝 承诺：${c.promises.replace(/\n/g, ' / ')}`);
+      if (c.appointmentTime) lines.push(`     📅 约看：${formatDate(new Date(c.appointmentTime).getTime())}`);
+    });
+  } else {
+    lines.push('  （暂无沟通记录）');
+  }
+  lines.push('');
+
+  const allPromises = comms.map(c => c.promises).filter(Boolean);
+  if (allPromises.length > 0) {
+    lines.push('【🤝 承诺事项汇总】');
+    allPromises.forEach(p => {
+      p.split(/[\n;；]/).map(s => s.trim()).filter(Boolean).forEach(line => {
+        lines.push(`  ☐ ${line}`);
+      });
+    });
+    lines.push('');
+  }
+
+  lines.push('【❓ 待问问题】（看房时请逐项确认）');
+  [
+    '租金、押金、付款方式是否与描述一致？',
+    '是否为房东本人？是否有房产证/授权？',
+    '水电燃气、物业、网费由谁承担？',
+    '押金退还条件？提前解约违约金多少？',
+    '是否允许转租？房屋维修谁负责？',
+    '家具家电清单及现状（拍照记录）',
+    '周边噪音、邻里、交通情况？'
+  ].forEach((q, i) => {
+    lines.push(`  ☐ Q${i + 1}: ${q}`);
+  });
+  lines.push('');
+
+  lines.push('【🔍 看房现场核对清单】');
+  VIEWING_CHECKLIST.forEach((item, i) => {
+    lines.push(`  ☐ ${String(i + 1).padStart(2, '0')}. ${item.label}`);
+  });
+  lines.push('');
+
+  lines.push('═══════════════════════════════════════');
+  lines.push(`生成时间：${new Date().toLocaleString()}`);
+  lines.push('═══════════════════════════════════════');
+
+  const text = lines.join('\n');
+  
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.style.position = 'fixed';
+  textarea.style.top = '-1000px';
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    document.execCommand('copy');
+    alert('📋 看房摘要已复制到剪贴板！\n\n可粘贴到笔记/备忘录中，或直接打印。');
+  } catch (e) {
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `看房摘要_${fav ? fav.title.substring(0, 15) : '房源'}_${new Date().toISOString().slice(0, 10)}.txt`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+  document.body.removeChild(textarea);
 }
 
 function showFavoriteModal(existing) {
@@ -1042,6 +1539,10 @@ function bindEvents() {
     if (!action) return;
 
     switch (action) {
+      case 'export-summary': {
+        if (url) exportViewingSummary(url);
+        break;
+      }
       case 'view-property':
       case 'view-fav-detail': {
         let targetUrl = url;

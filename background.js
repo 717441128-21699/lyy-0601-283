@@ -55,7 +55,65 @@ function generateId() {
 
 async function getState() {
   const result = await chrome.storage.local.get(Object.keys(DEFAULT_STATE));
-  return { ...DEFAULT_STATE, ...result };
+  const state = { ...DEFAULT_STATE, ...result };
+  const merged = await mergeDuplicateRisks(state.risks);
+  if (merged) {
+    state.risks = merged;
+    await setState({ risks: merged });
+  }
+  return state;
+}
+
+async function mergeDuplicateRisks(risks) {
+  if (!risks || risks.length === 0) return null;
+  
+  const groups = {};
+  risks.forEach(r => {
+    const key = `${r.url || 'unknown'}_${r.type}_${r.resolved ? '1' : '0'}`;
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(r);
+  });
+
+  let changed = false;
+  const newRisks = [];
+  
+  for (const key in groups) {
+    const group = groups[key];
+    if (group.length === 1) {
+      newRisks.push(group[0]);
+      continue;
+    }
+    
+    changed = true;
+    group.sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
+    const keep = { ...group[0] };
+    
+    const allSources = new Set();
+    const allDetails = [];
+    group.forEach(g => {
+      if (g.sources && Array.isArray(g.sources)) {
+        g.sources.forEach(s => allSources.add(s));
+      }
+      if (g.details && Array.isArray(g.details)) {
+        g.details.forEach(d => {
+          if (!allDetails.includes(d)) allDetails.push(d);
+        });
+      }
+    });
+    
+    if (allSources.size > 0) keep.sources = Array.from(allSources);
+    if (allDetails.length > 0) keep.details = allDetails;
+    
+    const riskDef = RISK_DEFS[keep.type] || { description: keep.title || keep.type };
+    const sourcesText = keep.sources && keep.sources.length > 0 ? `触发来源：${keep.sources.join('、')}` : '';
+    const detailsText = keep.details && keep.details.length > 0 ? `\n具体情况：\n${keep.details.map((d, i) => `${i + 1}. ${d}`).join('\n')}` : '';
+    keep.description = riskDef.description + (sourcesText || detailsText ? `\n\n${sourcesText}${detailsText}` : '');
+    keep.updatedAt = Date.now();
+    
+    newRisks.push(keep);
+  }
+  
+  return changed ? newRisks : null;
 }
 
 async function setState(partial) {
@@ -207,10 +265,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               const oldReminderIdx = state.reminders.findIndex(r => 
                 r.type === 'appointment' && r.communicationId === message.id && !r.triggered
               );
+              let remindersChanged = false;
               if (oldReminderIdx >= 0) {
                 const oldId = state.reminders[oldReminderIdx].id;
                 chrome.alarms.clear(`reminder_${oldId}`);
                 state.reminders.splice(oldReminderIdx, 1);
+                remindersChanged = true;
               }
               
               if (newTime) {
@@ -219,9 +279,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   communicationId: message.id,
                   appointmentTime: newTime
                 });
+                remindersChanged = true;
               }
               
-              if (oldReminderIdx >= 0 || newTime) {
+              if (remindersChanged) {
                 await setState({ reminders: state.reminders });
               }
             }
