@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "租房风险检查助手",
+  "version": "1.0.0",
+  "description": "帮助租客识别租房可疑信息，支持页面标注、房源收藏、风险清单、沟通记录和提醒中心",
+  "permissions": [
+    "storage",
+    "tabs",
+    "activeTab",
+    "notifications",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "租房风险检查助手"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}

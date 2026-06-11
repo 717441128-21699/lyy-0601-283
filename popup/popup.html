@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>租房风险检查助手</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <div class="app-title">
+        <span class="app-icon">🏠</span>
+        <div>
+          <h1>租房风险检查</h1>
+          <p class="app-subtitle">识别可疑信息 · 保障租房安全</p>
+        </div>
+      </div>
+      <div class="app-stats" id="appStats"></div>
+    </header>
+
+    <nav class="app-tabs">
+      <button class="tab-btn active" data-tab="favorites">
+        <span class="tab-icon">⭐</span>
+        <span>房源收藏</span>
+        <span class="tab-badge" id="badgeFavorites">0</span>
+      </button>
+      <button class="tab-btn" data-tab="risks">
+        <span class="tab-icon">⚠️</span>
+        <span>风险清单</span>
+        <span class="tab-badge tab-badge-danger" id="badgeRisks">0</span>
+      </button>
+      <button class="tab-btn" data-tab="communications">
+        <span class="tab-icon">💬</span>
+        <span>沟通记录</span>
+        <span class="tab-badge" id="badgeComm">0</span>
+      </button>
+      <button class="tab-btn" data-tab="reminders">
+        <span class="tab-icon">🔔</span>
+        <span>提醒中心</span>
+        <span class="tab-badge tab-badge-warning" id="badgeReminders">0</span>
+      </button>
+    </nav>
+
+    <main class="app-content">
+      <section class="tab-panel active" data-panel="favorites">
+        <div class="panel-toolbar">
+          <div class="filter-group">
+            <select id="filterCity">
+              <option value="">全部城市</option>
+            </select>
+            <select id="filterStatus">
+              <option value="">全部状态</option>
+              <option value="收藏中">收藏中</option>
+              <option value="待看房">待看房</option>
+              <option value="已看房">已看房</option>
+              <option value="考虑中">考虑中</option>
+              <option value="已签约">已签约</option>
+              <option value="已放弃">已放弃</option>
+            </select>
+          </div>
+          <button class="btn btn-primary" id="btnAddFavorite">
+            <span>+</span> 新增房源
+          </button>
+        </div>
+        <div class="favorites-grid" id="favoritesGrid"></div>
+        <div class="empty-state" id="emptyFavorites" style="display:none">
+          <div class="empty-icon">⭐</div>
+          <p>还没有收藏房源</p>
+          <p class="empty-hint">浏览房源页面时点击右下角浮动按钮即可收藏</p>
+        </div>
+      </section>
+
+      <section class="tab-panel" data-panel="risks">
+        <div class="panel-toolbar">
+          <div class="filter-group">
+            <select id="filterRiskLevel">
+              <option value="">全部等级</option>
+              <option value="high">高风险</option>
+              <option value="medium">中风险</option>
+              <option value="low">低风险</option>
+            </select>
+            <label class="checkbox">
+              <input type="checkbox" id="filterResolved">
+              <span>显示已解决</span>
+            </label>
+          </div>
+          <button class="btn btn-primary" id="btnAddRisk">
+            <span>+</span> 记录风险
+          </button>
+        </div>
+        <div class="risk-list" id="riskList"></div>
+        <div class="empty-state" id="emptyRisks" style="display:none">
+          <div class="empty-icon">✅</div>
+          <p>暂无风险记录</p>
+          <p class="empty-hint">保持警惕，发现可疑信息及时记录</p>
+        </div>
+      </section>
+
+      <section class="tab-panel" data-panel="communications">
+        <div class="panel-toolbar">
+          <div class="filter-group">
+            <select id="filterCommFav">
+              <option value="">全部房源</option>
+            </select>
+          </div>
+          <button class="btn btn-primary" id="btnAddComm">
+            <span>+</span> 新增记录
+          </button>
+        </div>
+        <div class="comm-list" id="commList"></div>
+        <div class="empty-state" id="emptyComm" style="display:none">
+          <div class="empty-icon">💬</div>
+          <p>还没有沟通记录</p>
+          <p class="empty-hint">记录与房东/中介的沟通要点，避免遗漏承诺</p>
+        </div>
+      </section>
+
+      <section class="tab-panel" data-panel="reminders">
+        <div class="panel-toolbar">
+          <div class="filter-group">
+            <select id="filterReminderType">
+              <option value="">全部类型</option>
+              <option value="viewing">看房提醒</option>
+              <option value="contract">签约提醒</option>
+              <option value="payment">付款核验</option>
+              <option value="appointment">约看提醒</option>
+              <option value="other">其他提醒</option>
+            </select>
+          </div>
+          <button class="btn btn-primary" id="btnAddReminder">
+            <span>+</span> 新建提醒
+          </button>
+        </div>
+        <div class="reminder-checklist" id="checklistTemplate"></div>
+        <div class="reminder-list" id="reminderList"></div>
+        <div class="empty-state" id="emptyReminders" style="display:none">
+          <div class="empty-icon">🔔</div>
+          <p>暂无提醒</p>
+          <p class="empty-hint">设置重要节点提醒，租房流程不遗漏</p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal" id="modal">
+    <div class="modal-overlay" data-close="modal"></div>
+    <div class="modal-content" id="modalContent"></div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
