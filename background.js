@@ -3,7 +3,9 @@ const DEFAULT_STATE = {
   risks: [],
   communications: [],
   reminders: [],
-  annotations: {}
+  annotations: {},
+  viewingReviews: {},
+  verifications: {}
 };
 
 const RISK_DEFS = {
@@ -254,18 +256,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (idx >= 0) {
             const oldComm = state.communications[idx];
             const oldTime = oldComm.appointmentTime ? new Date(oldComm.appointmentTime).getTime() : null;
+            
+            const rawNewTime = message.data.appointmentTime;
+            let newTime = null;
+            if (rawNewTime !== undefined) {
+              if (rawNewTime) {
+                const parsed = new Date(rawNewTime).getTime();
+                if (!isNaN(parsed)) newTime = parsed;
+              }
+              if (!newTime) {
+                message.data.appointmentTime = '';
+              }
+            } else {
+              newTime = oldTime;
+            }
+            
             state.communications[idx] = { ...state.communications[idx], ...message.data, updatedAt: Date.now() };
-            await setState({ communications: state.communications });
             
-            const newTime = message.data.appointmentTime !== undefined 
-              ? (message.data.appointmentTime ? new Date(message.data.appointmentTime).getTime() : null)
-              : oldTime;
-            
+            let remindersChanged = false;
             if (oldTime !== newTime) {
               const oldReminderIdx = state.reminders.findIndex(r => 
                 r.type === 'appointment' && r.communicationId === message.id && !r.triggered
               );
-              let remindersChanged = false;
               if (oldReminderIdx >= 0) {
                 const oldId = state.reminders[oldReminderIdx].id;
                 chrome.alarms.clear(`reminder_${oldId}`);
@@ -281,11 +293,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 });
                 remindersChanged = true;
               }
-              
-              if (remindersChanged) {
-                await setState({ reminders: state.reminders });
-              }
             }
+            
+            await setState({ 
+              communications: state.communications,
+              ...(remindersChanged ? { reminders: state.reminders } : {})
+            });
             sendResponse({ success: true, data: state.communications[idx] });
           } else {
             sendResponse({ success: false });
@@ -361,6 +374,36 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const state = await getState();
           const url = normalizeUrl(message.url);
           const data = state.annotations[url] || {};
+          sendResponse({ success: true, data });
+          break;
+        }
+        case 'saveViewingReview': {
+          const state = await getState();
+          const url = normalizeUrl(message.url);
+          state.viewingReviews[url] = { ...message.data, updatedAt: Date.now() };
+          await setState({ viewingReviews: state.viewingReviews });
+          sendResponse({ success: true });
+          break;
+        }
+        case 'getViewingReview': {
+          const state = await getState();
+          const url = normalizeUrl(message.url);
+          const data = state.viewingReviews[url] || {};
+          sendResponse({ success: true, data });
+          break;
+        }
+        case 'saveVerification': {
+          const state = await getState();
+          const url = normalizeUrl(message.url);
+          state.verifications[url] = { ...message.data, updatedAt: Date.now() };
+          await setState({ verifications: state.verifications });
+          sendResponse({ success: true });
+          break;
+        }
+        case 'getVerification': {
+          const state = await getState();
+          const url = normalizeUrl(message.url);
+          const data = state.verifications[url] || {};
           sendResponse({ success: true, data });
           break;
         }

@@ -4,6 +4,8 @@ let state = {
   communications: [],
   reminders: [],
   annotations: {},
+  viewingReviews: {},
+  verifications: {},
   filters: {
     city: '',
     status: '',
@@ -71,6 +73,8 @@ async function loadState() {
     state.communications = resp.data.communications || [];
     state.reminders = resp.data.reminders || [];
     state.annotations = resp.data.annotations || {};
+    state.viewingReviews = resp.data.viewingReviews || {};
+    state.verifications = resp.data.verifications || {};
     
     const saved = await chrome.storage.local.get(['checklist', 'compareWeights']);
     state.checklist = saved.checklist || {};
@@ -587,7 +591,7 @@ function closeModal() {
   document.getElementById('modal').classList.remove('open');
 }
 
-function calculateDecision({ fav, risks, comms, annotation }) {
+function calculateDecision({ fav, risks, comms, annotation, review }) {
   const reasons = [];
   let score = 50;
 
@@ -695,6 +699,48 @@ function calculateDecision({ fav, risks, comms, annotation }) {
     reasons.push({ type: 'status', text: `状态：已放弃`, weight: '强负' });
   }
 
+  if (review && review.updatedAt) {
+    if (review.realityScore) {
+      if (review.realityScore >= 4) {
+        score += 8;
+        reasons.push({ type: 'review', text: `现场真实度高 (${review.realityScore}/5)`, weight: '正' });
+      } else if (review.realityScore <= 2) {
+        score -= 10;
+        reasons.push({ type: 'review', text: `现场真实度低 (${review.realityScore}/5)，与描述可能有出入`, weight: '负' });
+      }
+    }
+    if (review.transparencyScore) {
+      if (review.transparencyScore >= 4) {
+        score += 5;
+        reasons.push({ type: 'review', text: `费用透明度高 (${review.transparencyScore}/5)`, weight: '弱正' });
+      } else if (review.transparencyScore <= 2) {
+        score -= 8;
+        reasons.push({ type: 'review', text: `费用透明度低 (${review.transparencyScore}/5)，可能有隐藏费用`, weight: '负' });
+      }
+    }
+    if (review.cooperationScore) {
+      if (review.cooperationScore >= 4) {
+        score += 5;
+        reasons.push({ type: 'review', text: `房东配合度高 (${review.cooperationScore}/5)`, weight: '弱正' });
+      } else if (review.cooperationScore <= 2) {
+        score -= 6;
+        reasons.push({ type: 'review', text: `房东配合度低 (${review.cooperationScore}/5)`, weight: '弱负' });
+      }
+    }
+    if (review.idVerified || review.propertyVerified) {
+      score += 5;
+      const verified = [];
+      if (review.idVerified) verified.push('身份证');
+      if (review.propertyVerified) verified.push('房产证');
+      if (review.authVerified) verified.push('授权书');
+      reasons.push({ type: 'review', text: `已核验：${verified.join('、')}`, weight: '弱正' });
+    }
+    if (review.facilityIssues) {
+      score -= 5;
+      reasons.push({ type: 'review', text: `存在设施问题需关注`, weight: '弱负' });
+    }
+  }
+
   score = Math.max(0, Math.min(100, score));
 
   let recommendation, recColor, recIcon;
@@ -732,14 +778,15 @@ function showPropertyDetail(url) {
 
   const title = fav ? fav.title : truncateUrl(url);
   const levelLabel = { high: '高风险', medium: '中风险', low: '低风险' };
-  const decision = calculateDecision({ fav, risks, comms, annotation });
+  const decision = calculateDecision({ fav, risks, comms, annotation, review: state.viewingReviews[url] || {} });
   const decisionReasonsByType = {
     risk: decision.reasons.filter(r => r.type === 'risk'),
     budget: decision.reasons.filter(r => r.type === 'budget'),
     commute: decision.reasons.filter(r => r.type === 'commute'),
     comm: decision.reasons.filter(r => r.type === 'comm'),
     appt: decision.reasons.filter(r => r.type === 'appt'),
-    status: decision.reasons.filter(r => r.type === 'status')
+    status: decision.reasons.filter(r => r.type === 'status'),
+    review: decision.reasons.filter(r => r.type === 'review')
   };
   const weightLabels = { '强正': '++', '正': '+', '弱正': '⊕', '弱负': '⊖', '负': '-', '强负': '--' };
   const weightColors = { '强正': '#27ae60', '正': '#2ecc71', '弱正': '#27ae60', '弱负': '#f39c12', '负': '#e67e22', '强负': '#e74c3c' };
@@ -770,6 +817,12 @@ function showPropertyDetail(url) {
         <button class="prop-tab" data-prop-tab="reminders">
           提醒 (${reminders.length})
         </button>
+        <button class="prop-tab" data-prop-tab="review">
+          复盘
+        </button>
+        <button class="prop-tab" data-prop-tab="verify">
+          核验
+        </button>
       </div>
 
       <div class="prop-tab-content active" data-prop-tab-content="decision">
@@ -793,7 +846,7 @@ function showPropertyDetail(url) {
             ${Object.entries(decisionReasonsByType).filter(([k, v]) => v.length > 0).map(([type, items]) => `
               <div class="decision-reason-group">
                 <div class="decision-reason-type">
-                  ${type === 'risk' ? '⚠️ 风险' : type === 'budget' ? '💰 预算' : type === 'commute' ? '🚇 通勤' : type === 'comm' ? '💬 沟通' : type === 'appt' ? '📅 约看' : '📋 状态'}
+                  ${type === 'risk' ? '⚠️ 风险' : type === 'budget' ? '💰 预算' : type === 'commute' ? '🚇 通勤' : type === 'comm' ? '💬 沟通' : type === 'appt' ? '📅 约看' : type === 'review' ? '🏠 复盘' : '📋 状态'}
                 </div>
                 ${items.map(r => `
                   <div class="decision-reason-item">
@@ -914,6 +967,167 @@ function showPropertyDetail(url) {
           </div>
         `).join('')}
       </div>
+
+      <div class="prop-tab-content" data-prop-tab-content="review">
+        ${(() => {
+          const review = state.viewingReviews[url] || {};
+          const hasReview = review.updatedAt;
+          return `
+            <div class="review-form">
+              <div class="review-section">
+                <div class="review-section-title">📸 现场照片说明</div>
+                <textarea class="review-textarea" data-review-key="photoNotes" placeholder="记录现场拍照发现的问题，如墙面裂缝、水管锈蚀等">${escapeHtml(review.photoNotes || '')}</textarea>
+              </div>
+              <div class="review-section">
+                <div class="review-section-title">🔧 设施问题</div>
+                <textarea class="review-textarea" data-review-key="facilityIssues" placeholder="记录水电、空调、热水器、门窗等设施问题">${escapeHtml(review.facilityIssues || '')}</textarea>
+              </div>
+              <div class="review-section">
+                <div class="review-section-title">💰 实际费用</div>
+                <textarea class="review-textarea" data-review-key="actualCosts" placeholder="记录实际租金、押金、中介费、物业费等，与标注对比">${escapeHtml(review.actualCosts || '')}</textarea>
+              </div>
+              <div class="review-section">
+                <div class="review-section-title">🪪 房东证件核验</div>
+                <div class="review-verify-row">
+                  <label class="review-check"><input type="checkbox" data-review-key="idVerified" ${review.idVerified ? 'checked' : ''}> 身份证已核实</label>
+                  <label class="review-check"><input type="checkbox" data-review-key="propertyVerified" ${review.propertyVerified ? 'checked' : ''}> 房产证已核实</label>
+                  <label class="review-check"><input type="checkbox" data-review-key="authVerified" ${review.authVerified ? 'checked' : ''}> 授权书已核实（二房东）</label>
+                </div>
+                <textarea class="review-textarea" data-review-key="verifyNotes" placeholder="证件核验补充说明">${escapeHtml(review.verifyNotes || '')}</textarea>
+              </div>
+              <div class="review-section">
+                <div class="review-section-title">⭐ 看房评分</div>
+                <div class="review-ratings">
+                  <div class="rating-row">
+                    <span class="rating-label">现场真实度</span>
+                    <div class="rating-stars" data-rating-key="realityScore">
+                      ${[1,2,3,4,5].map(n => `<span class="star ${(review.realityScore || 0) >= n ? 'active' : ''}" data-score="${n}">★</span>`).join('')}
+                    </div>
+                    <span class="rating-val">${review.realityScore || 0}/5</span>
+                  </div>
+                  <div class="rating-row">
+                    <span class="rating-label">费用透明度</span>
+                    <div class="rating-stars" data-rating-key="transparencyScore">
+                      ${[1,2,3,4,5].map(n => `<span class="star ${(review.transparencyScore || 0) >= n ? 'active' : ''}" data-score="${n}">★</span>`).join('')}
+                    </div>
+                    <span class="rating-val">${review.transparencyScore || 0}/5</span>
+                  </div>
+                  <div class="rating-row">
+                    <span class="rating-label">房东配合度</span>
+                    <div class="rating-stars" data-rating-key="cooperationScore">
+                      ${[1,2,3,4,5].map(n => `<span class="star ${(review.cooperationScore || 0) >= n ? 'active' : ''}" data-score="${n}">★</span>`).join('')}
+                    </div>
+                    <span class="rating-val">${review.cooperationScore || 0}/5</span>
+                  </div>
+                </div>
+              </div>
+              <div class="review-section">
+                <div class="review-section-title">📝 看房总评</div>
+                <textarea class="review-textarea" data-review-key="overallNotes" placeholder="综合看房感受、是否推荐、需注意的问题">${escapeHtml(review.overallNotes || '')}</textarea>
+              </div>
+              <div class="review-actions">
+                <button class="btn btn-primary btn-sm" id="btnSaveReview" data-review-url="${escapeHtml(url)}">💾 保存复盘</button>
+                ${hasReview ? `<span class="review-saved-time">上次保存：${formatDate(review.updatedAt)}</span>` : ''}
+              </div>
+            </div>
+          `;
+        })()}
+      </div>
+
+      <div class="prop-tab-content" data-prop-tab-content="verify">
+        ${(() => {
+          const verification = state.verifications[url] || {};
+          const review = state.viewingReviews[url] || {};
+          const unresolvedRisks = risks.filter(r => !r.resolved);
+          const allPromises = comms.map(c => c.promises).filter(Boolean);
+          const annFields = [
+            { key: 'price', label: '租金价格' },
+            { key: 'deposit', label: '押金' },
+            { key: 'paymentCycle', label: '付款周期' },
+            { key: 'agencyFee', label: '中介费' },
+            { key: 'landlordIdentity', label: '房东身份' },
+            { key: 'viewingMethod', label: '看房方式' },
+            { key: 'contractTerms', label: '合同条款' }
+          ];
+          const annFilled = annFields.filter(f => annotation[f.key]);
+          const paymentChecks = [
+            { key: 'vp1', label: '核实收款方身份与房东一致' },
+            { key: 'vp2', label: '收款账户为房东本人账户' },
+            { key: 'vp3', label: '索要正规收据或发票' },
+            { key: 'vp4', label: '银行转账备注用途' },
+            { key: 'vp5', label: '避免现金交易和私人转账' },
+            { key: 'vp6', label: '保留所有付款凭证' }
+          ];
+          const reviewChecks = [
+            { key: 'vr1', label: '现场照片已拍摄记录', checked: !!(review.photoNotes) },
+            { key: 'vr2', label: '设施问题已确认', checked: !!(review.facilityIssues) },
+            { key: 'vr3', label: '实际费用已核实', checked: !!(review.actualCosts) },
+            { key: 'vr4', label: '房东证件已核验', checked: !!(review.idVerified || review.propertyVerified) }
+          ];
+          
+          const checked = verification.checkedItems || {};
+          return `
+            <div class="verify-list">
+              <div class="verify-group">
+                <div class="verify-group-title">📝 页面标注确认 (${annFilled.length}/${annFields.length} 已填写)</div>
+                ${annFilled.map(f => `
+                  <label class="verify-item ${checked[`ann_${f.key}`] ? 'checked' : ''}">
+                    <input type="checkbox" data-verify-key="ann_${f.key}" ${checked[`ann_${f.key}`] ? 'checked' : ''}>
+                    <span>${f.label}：${escapeHtml(annotation[f.key])}</span>
+                  </label>
+                `).join('')}
+                ${annFilled.length === 0 ? '<div class="verify-empty">暂无页面标注</div>' : ''}
+              </div>
+              
+              <div class="verify-group">
+                <div class="verify-group-title">🤝 沟通承诺确认</div>
+                ${allPromises.length > 0 ? allPromises.map((p, i) => p.split(/[\n;；]/).map(s => s.trim()).filter(Boolean).map(line => `
+                  <label class="verify-item ${checked[`promise_${i}_${line.substring(0, 10)}`] ? 'checked' : ''}">
+                    <input type="checkbox" data-verify-key="promise_${i}_${line.substring(0, 10)}" ${checked[`promise_${i}_${line.substring(0, 10)}`] ? 'checked' : ''}>
+                    <span>${escapeHtml(line)}</span>
+                  </label>
+                `).join('')).join('') : '<div class="verify-empty">暂无沟通承诺</div>'}
+              </div>
+              
+              <div class="verify-group">
+                <div class="verify-group-title">⚠️ 风险项确认 (${unresolvedRisks.length} 项未解决)</div>
+                ${unresolvedRisks.length > 0 ? unresolvedRisks.map(r => `
+                  <label class="verify-item ${checked[`risk_${r.id}`] ? 'checked' : ''}">
+                    <input type="checkbox" data-verify-key="risk_${r.id}" ${checked[`risk_${r.id}`] ? 'checked' : ''}>
+                    <span class="verify-risk level-${r.level}">[${levelLabel[r.level] || '未知'}]</span>
+                    <span>${escapeHtml(r.title)}</span>
+                  </label>
+                `).join('') : '<div class="verify-empty">✅ 无未解决风险</div>'}
+              </div>
+              
+              <div class="verify-group">
+                <div class="verify-group-title">🏠 看房复盘确认</div>
+                ${reviewChecks.map(item => `
+                  <label class="verify-item ${checked[item.key] || item.checked ? 'checked' : ''}">
+                    <input type="checkbox" data-verify-key="${item.key}" ${checked[item.key] || item.checked ? 'checked' : ''}>
+                    <span>${item.label}</span>
+                  </label>
+                `).join('')}
+              </div>
+              
+              <div class="verify-group">
+                <div class="verify-group-title">💳 付款前核验</div>
+                ${paymentChecks.map(item => `
+                  <label class="verify-item ${checked[item.key] ? 'checked' : ''}">
+                    <input type="checkbox" data-verify-key="${item.key}" ${checked[item.key] ? 'checked' : ''}>
+                    <span>${item.label}</span>
+                  </label>
+                `).join('')}
+              </div>
+            </div>
+            
+            <div class="verify-footer">
+              <button class="btn btn-primary btn-sm" id="btnSaveVerify" data-verify-url="${escapeHtml(url)}">✅ 保存核验记录</button>
+              ${verification.updatedAt ? `<span class="verify-saved-time">上次核验：${formatDate(verification.updatedAt)}</span>` : ''}
+            </div>
+          `;
+        })()}
+      </div>
     </div>
   `;
 
@@ -937,6 +1151,59 @@ function showPropertyDetail(url) {
       content.querySelector(`[data-prop-tab-content="${tabName}"]`).classList.add('active');
     });
   });
+
+  content.querySelectorAll('.rating-stars .star').forEach(star => {
+    star.addEventListener('click', () => {
+      const container = star.closest('.rating-stars');
+      const ratingKey = container.dataset.ratingKey;
+      const score = parseInt(star.dataset.score);
+      container.querySelectorAll('.star').forEach((s, i) => {
+        s.classList.toggle('active', i < score);
+      });
+      const valEl = star.closest('.rating-row').querySelector('.rating-val');
+      if (valEl) valEl.textContent = `${score}/5`;
+      container.dataset.selectedScore = score;
+    });
+  });
+
+  const saveReviewBtn = content.querySelector('#btnSaveReview');
+  if (saveReviewBtn) {
+    saveReviewBtn.addEventListener('click', async () => {
+      const reviewUrl = saveReviewBtn.dataset.reviewUrl;
+      const data = {};
+      content.querySelectorAll('[data-review-key]').forEach(el => {
+        if (el.type === 'checkbox') {
+          data[el.dataset.reviewKey] = el.checked;
+        } else {
+          data[el.dataset.reviewKey] = el.value;
+        }
+      });
+      content.querySelectorAll('.rating-stars').forEach(container => {
+        const key = container.dataset.ratingKey;
+        data[key] = parseInt(container.dataset.selectedScore || '0');
+      });
+      await chrome.runtime.sendMessage({ action: 'saveViewingReview', url: reviewUrl, data });
+      state.viewingReviews[reviewUrl] = { ...data, updatedAt: Date.now() };
+      saveReviewBtn.textContent = '✓ 已保存';
+      setTimeout(() => { saveReviewBtn.textContent = '💾 保存复盘'; }, 1500);
+    });
+  }
+
+  const saveVerifyBtn = content.querySelector('#btnSaveVerify');
+  if (saveVerifyBtn) {
+    saveVerifyBtn.addEventListener('click', async () => {
+      const verifyUrl = saveVerifyBtn.dataset.verifyUrl;
+      const checkedItems = {};
+      content.querySelectorAll('[data-verify-key]').forEach(el => {
+        checkedItems[el.dataset.verifyKey] = el.checked;
+      });
+      const data = { checkedItems };
+      await chrome.runtime.sendMessage({ action: 'saveVerification', url: verifyUrl, data });
+      state.verifications[verifyUrl] = { ...data, updatedAt: Date.now() };
+      saveVerifyBtn.textContent = '✓ 已保存';
+      setTimeout(() => { saveVerifyBtn.textContent = '✅ 保存核验记录'; }, 1500);
+    });
+  }
 }
 
 function showCompareView() {
@@ -944,6 +1211,7 @@ function showCompareView() {
   if (selected.length < 2) return;
 
   let sortBy = 'score';
+  let scoreMode = 'pre'; // 'pre' or 'post'
   const localWeights = { ...state.compareWeights };
 
   function calcScore(fav) {
@@ -970,6 +1238,21 @@ function showCompareView() {
       else if (budget <= 4000) budgetScore = 70;
       else if (budget <= 6000) budgetScore = 50;
       else budgetScore = Math.max(0, 50 - (budget - 6000) / 200);
+    }
+
+    if (scoreMode === 'post') {
+      const rv = state.viewingReviews[fav.url] || {};
+      let reviewScore = 50;
+      if (rv.updatedAt) {
+        const reality = (rv.realityScore || 0) * 20;
+        const transparency = (rv.transparencyScore || 0) * 20;
+        const cooperation = (rv.cooperationScore || 0) * 20;
+        reviewScore = (reality + transparency + cooperation) / 3;
+        if (rv.idVerified) reviewScore = Math.min(100, reviewScore + 10);
+        if (rv.propertyVerified) reviewScore = Math.min(100, reviewScore + 10);
+      }
+      const totalWeight = localWeights.risk + localWeights.commute + localWeights.budget + 40;
+      return Math.round(riskScore * (localWeights.risk / totalWeight) + commuteScore * (localWeights.commute / totalWeight) + budgetScore * (localWeights.budget / totalWeight) + reviewScore * (40 / totalWeight));
     }
 
     const totalWeight = localWeights.risk + localWeights.commute + localWeights.budget;
@@ -1037,6 +1320,16 @@ function showCompareView() {
             ${sorted.map(f => {
               const apt = getAppointmentTime(f.id);
               return `<td>${apt ? formatDate(apt) : '-'}</td>`;
+            }).join('')}
+          </tr>
+          <tr class="compare-row-review">
+            <td class="compare-label">⭐ 看房评分</td>
+            ${sorted.map(f => {
+              const rv = state.viewingReviews[f.url] || {};
+              if (!rv.updatedAt) return '<td style="color:#bbb">未看房</td>';
+              const avg = Math.round(((rv.realityScore || 0) + (rv.transparencyScore || 0) + (rv.cooperationScore || 0)) / 3 * 10) / 10;
+              const color = avg >= 3.5 ? '#27ae60' : avg >= 2 ? '#f39c12' : '#e74c3c';
+              return `<td><b style="color:${color}">${avg}</b><span style="font-size:10px;color:#999"> / 5</span></td>`;
             }).join('')}
           </tr>
           <tr>
@@ -1141,6 +1434,10 @@ function showCompareView() {
           <button class="btn btn-sm btn-ghost" data-sort="commute">通勤最短</button>
           <button class="btn btn-sm btn-ghost" data-sort="budget">预算最低</button>
         </div>
+        <div class="compare-mode-toggle">
+          <button class="btn btn-sm btn-ghost ${scoreMode === 'pre' ? 'active-mode' : ''}" data-score-mode="pre">找房前</button>
+          <button class="btn btn-sm btn-ghost ${scoreMode === 'post' ? 'active-mode' : ''}" data-score-mode="post">看房后</button>
+        </div>
       </div>
       ${buildWeightPanel()}
       <div id="compareTableContainer">${buildTable()}</div>
@@ -1154,6 +1451,15 @@ function showCompareView() {
     btn.addEventListener('click', () => {
       sortBy = btn.dataset.sort;
       rerenderAll();
+    });
+  });
+
+  content.querySelectorAll('[data-score-mode]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      scoreMode = btn.dataset.scoreMode;
+      content.querySelectorAll('[data-score-mode]').forEach(b => b.classList.remove('active-mode'));
+      btn.classList.add('active-mode');
+      if (sortBy === 'score') rerenderAll();
     });
   });
 
@@ -1209,7 +1515,7 @@ function exportViewingSummary(url) {
     return cfav && (cfav.url === url || cfav.normUrl === url);
   });
   const annotation = state.annotations[url] || {};
-  const decision = calculateDecision({ fav, risks, comms, annotation });
+  const decision = calculateDecision({ fav, risks, comms, annotation, review: state.viewingReviews[url] || {} });
 
   const lines = [];
   lines.push('═══════════════════════════════════════');
@@ -1306,6 +1612,95 @@ function exportViewingSummary(url) {
     lines.push(`  ☐ Q${i + 1}: ${q}`);
   });
   lines.push('');
+
+  const review = state.viewingReviews[url] || {};
+  if (review.updatedAt) {
+    lines.push('───────────────────────────────────────');
+    lines.push('          📋 看房复盘结果          ');
+    lines.push('───────────────────────────────────────');
+    lines.push('');
+    if (review.photoNotes) {
+      lines.push('【📸 现场照片说明】');
+      review.photoNotes.split('\n').filter(Boolean).forEach(l => lines.push(`  · ${l}`));
+    }
+    if (review.facilityIssues) {
+      lines.push('【🔧 设施问题】');
+      review.facilityIssues.split('\n').filter(Boolean).forEach(l => lines.push(`  ⚠️ ${l}`));
+    }
+    if (review.actualCosts) {
+      lines.push('【💰 实际费用】');
+      review.actualCosts.split('\n').filter(Boolean).forEach(l => lines.push(`  · ${l}`));
+    }
+    lines.push('【🪪 证件核验】');
+    lines.push(`  身份证：${review.idVerified ? '✅ 已核实' : '☐ 未核实'}`);
+    lines.push(`  房产证：${review.propertyVerified ? '✅ 已核实' : '☐ 未核实'}`);
+    lines.push(`  授权书：${review.authVerified ? '✅ 已核实' : '☐ 不适用/未核实'}`);
+    if (review.verifyNotes) lines.push(`  备注：${review.verifyNotes}`);
+    lines.push('【⭐ 看房评分】');
+    lines.push(`  现场真实度：${review.realityScore || 0}/5`);
+    lines.push(`  费用透明度：${review.transparencyScore || 0}/5`);
+    lines.push(`  房东配合度：${review.cooperationScore || 0}/5`);
+    if (review.overallNotes) {
+      lines.push('【📝 看房总评】');
+      lines.push(`  ${review.overallNotes}`);
+    }
+    lines.push('');
+  }
+
+  const verification = state.verifications[url] || {};
+  if (verification.updatedAt || review.updatedAt) {
+    lines.push('───────────────────────────────────────');
+    lines.push('          📑 签约前核验清单          ');
+    lines.push('───────────────────────────────────────');
+    lines.push('');
+    const checked = verification.checkedItems || {};
+    lines.push('【📝 待确认标注】');
+    const annLabels = { price: '租金', deposit: '押金', paymentCycle: '付款周期', agencyFee: '中介费', landlordIdentity: '房东身份', viewingMethod: '看房方式', contractTerms: '合同条款' };
+    Object.keys(annLabels).forEach(k => {
+      if (annotation[k]) {
+        const ok = checked[`ann_${k}`] ? '✅' : '☐';
+        lines.push(`  ${ok} ${annLabels[k]}：${annotation[k]}`);
+      }
+    });
+    lines.push('');
+    lines.push('【🤝 待确认承诺】');
+    if (allPromises.length > 0) {
+      allPromises.forEach(p => {
+        p.split(/[\n;；]/).map(s => s.trim()).filter(Boolean).forEach(line => {
+          const key = `promise_0_${line.substring(0, 10)}`;
+          const ok = checked[key] ? '✅' : '☐';
+          lines.push(`  ${ok} ${line}`);
+        });
+      });
+    } else {
+      lines.push('  （无承诺记录）');
+    }
+    lines.push('');
+    lines.push('【⚠️ 待确认风险】');
+    if (unresolvedRisks.length > 0) {
+      unresolvedRisks.forEach(r => {
+        const ok = checked[`risk_${r.id}`] ? '✅' : '☐';
+        lines.push(`  ${ok} [${levelLabel[r.level] || '未知'}] ${r.title}`);
+      });
+    } else {
+      lines.push('  ✅ 无未解决风险');
+    }
+    lines.push('');
+    lines.push('【💳 付款前必检项】');
+    const paymentItems = [
+      { key: 'vp1', label: '核实收款方身份与房东一致' },
+      { key: 'vp2', label: '收款账户为房东本人账户' },
+      { key: 'vp3', label: '索要正规收据或发票' },
+      { key: 'vp4', label: '银行转账备注用途' },
+      { key: 'vp5', label: '避免现金交易和私人转账' },
+      { key: 'vp6', label: '保留所有付款凭证' }
+    ];
+    paymentItems.forEach(item => {
+      const ok = checked[item.key] ? '✅' : '☐';
+      lines.push(`  ${ok} ${item.label}`);
+    });
+    lines.push('');
+  }
 
   lines.push('【🔍 看房现场核对清单】');
   VIEWING_CHECKLIST.forEach((item, i) => {
