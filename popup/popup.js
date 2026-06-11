@@ -3,6 +3,7 @@ let state = {
   risks: [],
   communications: [],
   reminders: [],
+  annotations: {},
   filters: {
     city: '',
     status: '',
@@ -13,7 +14,10 @@ let state = {
     commFavId: '',
     reminderType: ''
   },
-  checklist: {}
+  checklist: {},
+  riskViewMode: 'group',
+  compareMode: false,
+  selectedFavorites: []
 };
 
 const VIEWING_CHECKLIST = [
@@ -61,6 +65,7 @@ async function loadState() {
     state.risks = resp.data.risks || [];
     state.communications = resp.data.communications || [];
     state.reminders = resp.data.reminders || [];
+    state.annotations = resp.data.annotations || {};
     
     const savedChecklist = await chrome.storage.local.get('checklist');
     state.checklist = savedChecklist.checklist || {};
@@ -170,6 +175,8 @@ function isInRange(value, rangeStr) {
 function renderFavorites() {
   const grid = document.getElementById('favoritesGrid');
   const empty = document.getElementById('emptyFavorites');
+  const actionsBar = document.getElementById('favActionsBar');
+  const toggleBtn = document.getElementById('btnToggleCompare');
   
   let filtered = state.favorites;
   
@@ -192,6 +199,22 @@ function renderFavorites() {
     });
   }
 
+  if (state.favorites.length >= 2) {
+    toggleBtn.style.display = '';
+  } else {
+    toggleBtn.style.display = 'none';
+    state.compareMode = false;
+    state.selectedFavorites = [];
+  }
+
+  if (state.compareMode) {
+    actionsBar.style.display = 'flex';
+    document.getElementById('selectedCount').textContent = state.selectedFavorites.length;
+    document.getElementById('btnStartCompare').disabled = state.selectedFavorites.length < 2;
+  } else {
+    actionsBar.style.display = 'none';
+  }
+
   if (filtered.length === 0) {
     grid.innerHTML = '';
     empty.style.display = 'block';
@@ -201,11 +224,25 @@ function renderFavorites() {
 
   filtered.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   
-  grid.innerHTML = filtered.map(f => `
-    <div class="fav-card" data-id="${f.id}">
+  grid.innerHTML = filtered.map(f => {
+    const riskCount = state.risks.filter(r => r.url === f.url && !r.resolved).length;
+    const hasReminded = state.reminders.some(r => r.favoriteId === f.id && r.triggered);
+    const isSelected = state.selectedFavorites.includes(f.id);
+    
+    return `
+    <div class="fav-card ${state.compareMode ? 'compare-mode' : ''} ${isSelected ? 'selected' : ''}" data-id="${f.id}">
+      ${state.compareMode ? `
+        <label class="fav-checkbox">
+          <input type="checkbox" ${isSelected ? 'checked' : ''} data-action="toggle-select" data-id="${f.id}">
+        </label>
+      ` : ''}
       <div class="fav-header">
         <div class="fav-title">${escapeHtml(f.title)}</div>
-        <span class="fav-status status-${f.status || '收藏中'}">${f.status || '收藏中'}</span>
+        <div class="fav-header-right">
+          ${riskCount > 0 ? `<span class="fav-risk-badge" title="${riskCount}项未解决风险">⚠️ ${riskCount}</span>` : ''}
+          ${hasReminded ? '<span class="fav-reminded-badge" title="有待办提醒">🔔</span>' : ''}
+          <span class="fav-status status-${f.status || '收藏中'}">${f.status || '收藏中'}</span>
+        </div>
       </div>
       <div class="fav-meta">
         ${f.city ? `<span>📍 ${escapeHtml(f.city)}</span>` : ''}
@@ -215,13 +252,47 @@ function renderFavorites() {
       <div class="fav-footer">
         <span class="fav-time">${formatDate(f.createdAt)}</span>
         <div class="fav-actions">
+          <button class="icon-btn" data-action="view-fav-detail" title="查看详情" data-id="${f.id}">📋</button>
           <button class="icon-btn" data-action="open-url" title="打开链接" data-url="${escapeHtml(f.url || '')}">🔗</button>
           <button class="icon-btn" data-action="edit-fav" title="编辑">✏️</button>
           <button class="icon-btn danger" data-action="delete-fav" title="删除">🗑️</button>
         </div>
       </div>
     </div>
-  `).join('');
+  `}).join('');
+}
+
+function getRisksByUrl(filtered) {
+  const groups = {};
+  filtered.forEach(r => {
+    const url = r.url || 'unknown';
+    if (!groups[url]) {
+      groups[url] = {
+        url,
+        risks: [],
+        highCount: 0,
+        mediumCount: 0,
+        lowCount: 0,
+        unresolvedCount: 0
+      };
+    }
+    groups[url].risks.push(r);
+    if (!r.resolved) {
+      groups[url].unresolvedCount++;
+      if (r.level === 'high') groups[url].highCount++;
+      else if (r.level === 'medium') groups[url].mediumCount++;
+      else groups[url].lowCount++;
+    }
+  });
+  return Object.values(groups).sort((a, b) => {
+    if (b.unresolvedCount !== a.unresolvedCount) return b.unresolvedCount - a.unresolvedCount;
+    if (b.highCount !== a.highCount) return b.highCount - a.highCount;
+    return b.mediumCount - a.mediumCount;
+  });
+}
+
+function getFavoriteByUrl(url) {
+  return state.favorites.find(f => f.url === url || (f.normUrl && f.normUrl === url));
 }
 
 function renderRisks() {
@@ -243,31 +314,71 @@ function renderRisks() {
   }
   empty.style.display = 'none';
 
-  filtered.sort((a, b) => {
-    const levelOrder = { high: 0, medium: 1, low: 2 };
-    if (a.resolved !== b.resolved) return a.resolved ? 1 : -1;
-    if (a.level !== b.level) return (levelOrder[a.level] ?? 3) - (levelOrder[b.level] ?? 3);
-    return (b.createdAt || 0) - (a.createdAt || 0);
-  });
+  if (state.riskViewMode === 'group') {
+    const groups = getRisksByUrl(filtered);
+    list.innerHTML = groups.map(g => {
+      const fav = getFavoriteByUrl(g.url);
+      const title = fav ? fav.title : truncateUrl(g.url);
+      const urlLabel = g.url === 'unknown' ? '未关联房源' : truncateUrl(g.url);
+      return `
+        <div class="risk-group-card" data-url="${escapeHtml(g.url)}">
+          <div class="risk-group-header">
+            <div class="risk-group-title" title="${escapeHtml(title)}">
+              <span class="risk-group-icon">🏠</span>
+              <span>${escapeHtml(title)}</span>
+            </div>
+            <div class="risk-group-stats">
+              ${g.highCount > 0 ? `<span class="risk-badge high">高 ${g.highCount}</span>` : ''}
+              ${g.mediumCount > 0 ? `<span class="risk-badge medium">中 ${g.mediumCount}</span>` : ''}
+              ${g.lowCount > 0 ? `<span class="risk-badge low">低 ${g.lowCount}</span>` : ''}
+              <span class="risk-group-count">共 ${g.risks.length} 项</span>
+            </div>
+          </div>
+          <div class="risk-group-url">${escapeHtml(urlLabel)}</div>
+          <div class="risk-group-mini">
+            ${g.risks.slice(0, 2).map(r => `
+              <div class="risk-mini-item level-${r.level || 'medium'} ${r.resolved ? 'resolved' : ''}">
+                <span class="risk-mini-dot"></span>
+                <span class="risk-mini-title">${escapeHtml(r.title)}</span>
+              </div>
+            `).join('')}
+            ${g.risks.length > 2 ? `<div class="risk-more">还有 ${g.risks.length - 2} 项...</div>` : ''}
+          </div>
+          <div class="risk-group-footer">
+            <button class="btn btn-sm btn-ghost" data-action="view-property" data-url="${escapeHtml(g.url)}">
+              查看详情
+            </button>
+          </div>
+        </div>
+      `;
+    }).join('');
+  } else {
+    filtered.sort((a, b) => {
+      const levelOrder = { high: 0, medium: 1, low: 2 };
+      if (a.resolved !== b.resolved) return a.resolved ? 1 : -1;
+      if (a.level !== b.level) return (levelOrder[a.level] ?? 3) - (levelOrder[b.level] ?? 3);
+      return (b.createdAt || 0) - (a.createdAt || 0);
+    });
 
-  const levelLabel = { high: '高风险', medium: '中风险', low: '低风险' };
-  
-  list.innerHTML = filtered.map(r => `
-    <div class="risk-card level-${r.level || 'medium'} ${r.resolved ? 'resolved' : ''}">
-      <div class="risk-header">
-        <div class="risk-title">${escapeHtml(r.title)}</div>
-        <span class="risk-level">${levelLabel[r.level] || '未知'}</span>
-      </div>
-      <div class="risk-desc">${escapeHtml(r.description || '')}</div>
-      <div class="risk-footer">
-        ${r.url ? `<a class="risk-url" href="#" data-url="${escapeHtml(r.url)}">${escapeHtml(truncateUrl(r.url))}</a>` : `<span style="font-size:11px;color:#999">${formatDate(r.createdAt)}</span>`}
-        <div class="risk-actions">
-          ${!r.resolved ? `<button class="btn btn-sm" data-action="resolve-risk" data-id="${r.id}">标记解决</button>` : ''}
-          <button class="icon-btn danger" data-action="delete-risk" data-id="${r.id}">🗑️</button>
+    const levelLabel = { high: '高风险', medium: '中风险', low: '低风险' };
+    
+    list.innerHTML = filtered.map(r => `
+      <div class="risk-card level-${r.level || 'medium'} ${r.resolved ? 'resolved' : ''}">
+        <div class="risk-header">
+          <div class="risk-title">${escapeHtml(r.title)}</div>
+          <span class="risk-level">${levelLabel[r.level] || '未知'}</span>
+        </div>
+        <div class="risk-desc">${escapeHtml(r.description || '')}</div>
+        <div class="risk-footer">
+          ${r.url ? `<a class="risk-url" href="#" data-url="${escapeHtml(r.url)}" data-action="view-property">${escapeHtml(truncateUrl(r.url))}</a>` : `<span style="font-size:11px;color:#999">${formatDate(r.createdAt)}</span>`}
+          <div class="risk-actions">
+            ${!r.resolved ? `<button class="btn btn-sm" data-action="resolve-risk" data-id="${r.id}">标记解决</button>` : ''}
+            <button class="icon-btn danger" data-action="delete-risk" data-id="${r.id}">🗑️</button>
+          </div>
         </div>
       </div>
-    </div>
-  `).join('');
+    `).join('');
+  }
 }
 
 function renderCommunications() {
@@ -290,11 +401,18 @@ function renderCommunications() {
 
   list.innerHTML = filtered.map(c => {
     const fav = state.favorites.find(f => f.id === c.favoriteId);
+    const hasReminder = state.reminders.some(r => r.communicationId === c.id && !r.triggered);
+    const hasTriggered = state.reminders.some(r => r.communicationId === c.id && r.triggered);
+    
     return `
       <div class="comm-card" data-id="${c.id}">
         <div class="comm-header">
           <span class="comm-fav">${fav ? escapeHtml(fav.title.substring(0, 25)) : '未关联房源'}</span>
-          ${c.contact ? `<span class="comm-contact">👤 ${escapeHtml(c.contact)}</span>` : ''}
+          <div style="display:flex;align-items:center;gap:6px">
+            ${hasReminder ? '<span class="comm-badge" title="有待提醒">🔔</span>' : ''}
+            ${hasTriggered ? '<span class="comm-badge reminded" title="已提醒">✅</span>' : ''}
+            ${c.contact ? `<span class="comm-contact">👤 ${escapeHtml(c.contact)}</span>` : ''}
+          </div>
         </div>
         ${c.keyPoints ? `
           <div class="comm-points">
@@ -455,6 +573,273 @@ function openModal(title, bodyHtml, onSubmit) {
 
 function closeModal() {
   document.getElementById('modal').classList.remove('open');
+}
+
+function showPropertyDetail(url) {
+  const fav = getFavoriteByUrl(url);
+  const risks = state.risks.filter(r => r.url === url);
+  const comms = state.communications.filter(c => {
+    if (fav && c.favoriteId === fav.id) return true;
+    const cfav = state.favorites.find(f => f.id === c.favoriteId);
+    return cfav && (cfav.url === url || cfav.normUrl === url);
+  });
+  const annotation = state.annotations[url] || {};
+  const reminders = state.reminders.filter(r => {
+    if (fav && r.favoriteId === fav.id) return true;
+    if (r.url === url) return true;
+    return false;
+  });
+
+  const title = fav ? fav.title : truncateUrl(url);
+  const levelLabel = { high: '高风险', medium: '中风险', low: '低风险' };
+
+  const html = `
+    <div class="property-detail">
+      <div class="prop-detail-header">
+        <div class="prop-detail-title">🏠 ${escapeHtml(title)}</div>
+        ${fav ? `<div class="prop-detail-status">${escapeHtml(fav.status || '收藏中')}</div>` : ''}
+      </div>
+      
+      <div class="prop-tabs">
+        <button class="prop-tab active" data-prop-tab="risks">
+          风险 (${risks.filter(r => !r.resolved).length}/${risks.length})
+        </button>
+        <button class="prop-tab" data-prop-tab="annotation">
+          页面标注
+        </button>
+        <button class="prop-tab" data-prop-tab="comms">
+          沟通记录 (${comms.length})
+        </button>
+        <button class="prop-tab" data-prop-tab="reminders">
+          提醒 (${reminders.length})
+        </button>
+      </div>
+
+      <div class="prop-tab-content active" data-prop-tab-content="risks">
+        ${risks.length === 0 ? `
+          <div class="prop-empty">暂无风险记录</div>
+        ` : risks.map(r => `
+          <div class="prop-risk-item level-${r.level || 'medium'} ${r.resolved ? 'resolved' : ''}">
+            <div class="prop-risk-header">
+              <span class="prop-risk-title">${escapeHtml(r.title)}</span>
+              <span class="prop-risk-level">${levelLabel[r.level] || '未知'}</span>
+            </div>
+            <div class="prop-risk-desc">${escapeHtml(r.description || '').replace(/\n/g, '<br>')}</div>
+            ${r.sources && r.sources.length > 0 ? `
+              <div class="prop-risk-sources">触发来源：${r.sources.map(s => escapeHtml(s)).join('、')}</div>
+            ` : ''}
+            <div class="prop-risk-meta">
+              <span>${formatDate(r.createdAt)}</span>
+              ${r.autoGenerated ? '<span class="auto-tag">自动检测</span>' : '<span class="manual-tag">手动记录</span>'}
+            </div>
+          </div>
+        `).join('')}
+      </div>
+
+      <div class="prop-tab-content" data-prop-tab-content="annotation">
+        ${!annotation || Object.keys(annotation).length === 0 || !annotation.updatedAt ? `
+          <div class="prop-empty">暂无页面标注</div>
+        ` : `
+          <div class="annotation-list">
+            <div class="annotation-item">
+              <span class="annotation-label">💰 租金价格</span>
+              <span class="annotation-value">${escapeHtml(annotation.price || '未填写')}</span>
+            </div>
+            <div class="annotation-item">
+              <span class="annotation-label">💵 押金</span>
+              <span class="annotation-value">${escapeHtml(annotation.deposit || '未填写')}</span>
+            </div>
+            <div class="annotation-item">
+              <span class="annotation-label">📅 付款周期</span>
+              <span class="annotation-value">${escapeHtml(annotation.paymentCycle || '未填写')}</span>
+            </div>
+            <div class="annotation-item">
+              <span class="annotation-label">🏢 中介费</span>
+              <span class="annotation-value">${escapeHtml(annotation.agencyFee || '未填写')}</span>
+            </div>
+            <div class="annotation-item">
+              <span class="annotation-label">👤 房东身份</span>
+              <span class="annotation-value">${escapeHtml(annotation.landlordIdentity || '未填写')}</span>
+            </div>
+            <div class="annotation-item">
+              <span class="annotation-label">🔑 看房方式</span>
+              <span class="annotation-value">${escapeHtml(annotation.viewingMethod || '未填写')}</span>
+            </div>
+            <div class="annotation-item">
+              <span class="annotation-label">📝 合同条款</span>
+              <span class="annotation-value">${escapeHtml(annotation.contractTerms || '未填写')}</span>
+            </div>
+          </div>
+          <div class="annotation-update-time">更新于 ${formatDate(annotation.updatedAt)}</div>
+        `}
+      </div>
+
+      <div class="prop-tab-content" data-prop-tab-content="comms">
+        ${comms.length === 0 ? `
+          <div class="prop-empty">暂无沟通记录</div>
+        ` : comms.map(c => `
+          <div class="prop-comm-item">
+            ${c.contact ? `<div class="prop-comm-contact">👤 ${escapeHtml(c.contact)}</div>` : ''}
+            ${c.keyPoints ? `<div class="prop-comm-text"><b>要点：</b>${escapeHtml(c.keyPoints)}</div>` : ''}
+            ${c.promises ? `<div class="prop-comm-text"><b>承诺：</b>${escapeHtml(c.promises)}</div>` : ''}
+            <div class="prop-comm-meta">
+              <span>${formatDate(c.createdAt)}</span>
+              ${c.appointmentTime ? `<span>📅 约看：${formatDate(new Date(c.appointmentTime).getTime())}</span>` : ''}
+            </div>
+          </div>
+        `).join('')}
+      </div>
+
+      <div class="prop-tab-content" data-prop-tab-content="reminders">
+        ${reminders.length === 0 ? `
+          <div class="prop-empty">暂无提醒</div>
+        ` : reminders.map(r => `
+          <div class="prop-reminder-item ${r.triggered ? 'triggered' : ''}">
+            <div class="prop-reminder-header">
+              <span class="prop-reminder-title">${escapeHtml(r.title || r.type)}</span>
+              ${r.triggered ? '<span class="reminded-tag">已提醒</span>' : '<span class="pending-tag">待提醒</span>'}
+            </div>
+            <div class="prop-reminder-time">⏰ ${formatDate(r.triggerTime || r.createdAt)}</div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+
+  const modal = document.getElementById('modal');
+  const content = document.getElementById('modalContent');
+  content.innerHTML = `
+    <div class="modal-header">
+      <div class="modal-title">房源详情</div>
+      <button class="modal-close" data-close="modal">×</button>
+    </div>
+    <div class="modal-body modal-body-large">${html}</div>
+  `;
+  modal.classList.add('open', 'property-detail-modal');
+
+  content.querySelectorAll('[data-prop-tab]').forEach(tab => {
+    tab.addEventListener('click', () => {
+      const tabName = tab.dataset.propTab;
+      content.querySelectorAll('[data-prop-tab]').forEach(t => t.classList.remove('active'));
+      content.querySelectorAll('[data-prop-tab-content]').forEach(tc => tc.classList.remove('active'));
+      tab.classList.add('active');
+      content.querySelector(`[data-prop-tab-content="${tabName}"]`).classList.add('active');
+    });
+  });
+}
+
+function showCompareView() {
+  const selected = state.favorites.filter(f => state.selectedFavorites.includes(f.id));
+  if (selected.length < 2) return;
+
+  let sortBy = 'risk';
+
+  function buildTable() {
+    const sorted = [...selected];
+    if (sortBy === 'risk') {
+      sorted.sort((a, b) => getRiskCount(a.url) - getRiskCount(b.url));
+    } else if (sortBy === 'commute') {
+      sorted.sort((a, b) => (extractCommuteMinutes(a.commute) || 9999) - (extractCommuteMinutes(b.commute) || 9999));
+    } else if (sortBy === 'budget') {
+      sorted.sort((a, b) => (extractPriceValue(a.budget) || 99999) - (extractPriceValue(b.budget) || 99999));
+    }
+
+    return `
+      <table class="compare-table">
+        <thead>
+          <tr>
+            <th class="compare-label-col">对比项</th>
+            ${sorted.map(f => `<th class="compare-item-col">${escapeHtml(f.title.substring(0, 12))}</th>`).join('')}
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="compare-label">💰 预算</td>
+            ${sorted.map(f => `<td>${escapeHtml(f.budget || '-')}</td>`).join('')}
+          </tr>
+          <tr>
+            <td class="compare-label">🚇 通勤</td>
+            ${sorted.map(f => `<td>${escapeHtml(f.commute || '-')}</td>`).join('')}
+          </tr>
+          <tr>
+            <td class="compare-label">🏙️ 城市</td>
+            ${sorted.map(f => `<td>${escapeHtml(f.city || '-')}</td>`).join('')}
+          </tr>
+          <tr>
+            <td class="compare-label">📋 状态</td>
+            ${sorted.map(f => `<td>${escapeHtml(f.status || '-')}</td>`).join('')}
+          </tr>
+          <tr class="compare-row-risk">
+            <td class="compare-label">⚠️ 风险数量</td>
+            ${sorted.map(f => {
+              const count = getRiskCount(f.url);
+              return `<td class="${count > 0 ? 'risk-highlight' : ''}"><b>${count}</b> 项</td>`;
+            }).join('')}
+          </tr>
+          <tr>
+            <td class="compare-label">📅 约看时间</td>
+            ${sorted.map(f => {
+              const apt = getAppointmentTime(f.id);
+              return `<td>${apt ? formatDate(apt) : '-'}</td>`;
+            }).join('')}
+          </tr>
+          <tr>
+            <td class="compare-label">📝 备注</td>
+            ${sorted.map(f => `<td>${escapeHtml((f.notes || '').substring(0, 30)) || '-'}</td>`).join('')}
+          </tr>
+        </tbody>
+      </table>
+    `;
+  }
+
+  function getRiskCount(url) {
+    return state.risks.filter(r => r.url === url && !r.resolved).length;
+  }
+
+  function getAppointmentTime(favId) {
+    const comm = state.communications
+      .filter(c => c.favoriteId === favId && c.appointmentTime)
+      .sort((a, b) => new Date(a.appointmentTime) - new Date(b.appointmentTime))[0];
+    return comm ? new Date(comm.appointmentTime).getTime() : null;
+  }
+
+  function rerender() {
+    document.getElementById('compareTableContainer').innerHTML = buildTable();
+  }
+
+  const modal = document.getElementById('modal');
+  const content = document.getElementById('modalContent');
+  content.innerHTML = `
+    <div class="modal-header">
+      <div class="modal-title">房源对比 (${selected.length} 套)</div>
+      <button class="modal-close" data-close="modal">×</button>
+    </div>
+    <div class="modal-body modal-body-large">
+      <div class="compare-toolbar">
+        <span>排序方式：</span>
+        <div class="compare-sort-btns">
+          <button class="btn btn-sm ${sortBy === 'risk' ? 'btn-primary' : 'btn-ghost'}" data-sort="risk">风险最少</button>
+          <button class="btn btn-sm ${sortBy === 'commute' ? 'btn-primary' : 'btn-ghost'}" data-sort="commute">通勤最短</button>
+          <button class="btn btn-sm ${sortBy === 'budget' ? 'btn-primary' : 'btn-ghost'}" data-sort="budget">预算最低</button>
+        </div>
+      </div>
+      <div id="compareTableContainer">${buildTable()}</div>
+    </div>
+  `;
+  modal.classList.add('open', 'compare-modal');
+
+  content.querySelectorAll('[data-sort]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      sortBy = btn.dataset.sort;
+      content.querySelectorAll('[data-sort]').forEach(b => {
+        b.classList.remove('btn-primary');
+        b.classList.add('btn-ghost');
+      });
+      btn.classList.remove('btn-ghost');
+      btn.classList.add('btn-primary');
+      rerender();
+    });
+  });
 }
 
 function showFavoriteModal(existing) {
@@ -657,6 +1042,27 @@ function bindEvents() {
     if (!action) return;
 
     switch (action) {
+      case 'view-property':
+      case 'view-fav-detail': {
+        let targetUrl = url;
+        if (action === 'view-fav-detail') {
+          const fav = state.favorites.find(f => f.id === id);
+          if (fav) targetUrl = fav.url;
+        }
+        if (targetUrl) showPropertyDetail(targetUrl);
+        break;
+      }
+      case 'toggle-select': {
+        e.stopPropagation();
+        const idx = state.selectedFavorites.indexOf(id);
+        if (idx >= 0) {
+          state.selectedFavorites.splice(idx, 1);
+        } else {
+          state.selectedFavorites.push(id);
+        }
+        renderFavorites();
+        break;
+      }
       case 'open-url':
         if (url) chrome.tabs.create({ url });
         break;
@@ -667,6 +1073,7 @@ function bindEvents() {
       }
       case 'delete-fav':
         if (confirm('确定要删除这个房源吗？')) {
+          state.selectedFavorites = state.selectedFavorites.filter(sid => sid !== id);
           await chrome.runtime.sendMessage({ action: 'deleteFavorite', id });
           await loadState();
         }
@@ -718,6 +1125,31 @@ function bindEvents() {
   document.getElementById('btnAddRisk').addEventListener('click', () => showRiskModal());
   document.getElementById('btnAddComm').addEventListener('click', () => showCommunicationModal());
   document.getElementById('btnAddReminder').addEventListener('click', () => showReminderModal());
+
+  document.getElementById('btnToggleCompare').addEventListener('click', () => {
+    state.compareMode = !state.compareMode;
+    if (!state.compareMode) {
+      state.selectedFavorites = [];
+    }
+    renderFavorites();
+  });
+
+  document.getElementById('btnStartCompare').addEventListener('click', () => {
+    if (state.selectedFavorites.length >= 2) {
+      showCompareView();
+    }
+  });
+
+  document.getElementById('btnCancelCompare').addEventListener('click', () => {
+    state.compareMode = false;
+    state.selectedFavorites = [];
+    renderFavorites();
+  });
+
+  document.getElementById('riskViewMode').addEventListener('change', (e) => {
+    state.riskViewMode = e.target.value;
+    renderRisks();
+  });
 
   document.getElementById('filterCity').addEventListener('change', (e) => {
     state.filters.city = e.target.value;

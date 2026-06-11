@@ -58,9 +58,14 @@
               <option value="已放弃">已放弃</option>
             </select>
           </div>
-          <button class="btn btn-primary btn-sm" id="btnAddFavorite">
-            <span>+</span> 新增
-          </button>
+          <div class="filter-group">
+            <button class="btn btn-secondary btn-sm" id="btnToggleCompare" style="display:none">
+              <span>📊</span> 对比
+            </button>
+            <button class="btn btn-primary btn-sm" id="btnAddFavorite">
+              <span>+</span> 新增
+            </button>
+          </div>
         </div>
         <div class="filter-row">
           <div class="filter-item">
@@ -86,6 +91,13 @@
             </select>
           </div>
         </div>
+        <div class="fav-actions-bar" id="favActionsBar" style="display:none">
+          <span class="selected-count">已选 <b id="selectedCount">0</b> 套</span>
+          <div class="fav-actions">
+            <button class="btn btn-primary btn-sm" id="btnStartCompare" disabled>开始对比</button>
+            <button class="btn btn-ghost btn-sm" id="btnCancelCompare">取消</button>
+          </div>
+        </div>
         <div class="favorites-grid" id="favoritesGrid"></div>
         <div class="empty-state" id="emptyFavorites" style="display:none">
           <div class="empty-icon">⭐</div>
@@ -108,9 +120,15 @@
               <span>显示已解决</span>
             </label>
           </div>
-          <button class="btn btn-primary" id="btnAddRisk">
-            <span>+</span> 记录风险
-          </button>
+          <div class="filter-group">
+            <select id="riskViewMode" title="视图切换">
+              <option value="group">按房源分组</option>
+              <option value="list">全部列表</option>
+            </select>
+            <button class="btn btn-primary" id="btnAddRisk">
+              <span>+</span> 记录风险
+            </button>
+          </div>
         </div>
         <div class="risk-list" id="riskList"></div>
         <div class="empty-state" id="emptyRisks" style="display:none">

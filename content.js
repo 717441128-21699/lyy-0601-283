@@ -282,10 +282,10 @@
     isSaving = true;
 
     const data = {};
-    document.querySelectorAll('.rental-tab-panel[data-panel="annotate"] [data-key]').forEach(el => {
-      if (el.value && el.value.trim()) {
-        data[el.dataset.key] = el.value.trim();
-      }
+    const allFields = ['price', 'deposit', 'paymentCycle', 'agencyFee', 'landlordIdentity', 'viewingMethod', 'contractTerms'];
+    allFields.forEach(key => {
+      const el = document.querySelector(`.rental-tab-panel[data-panel="annotate"] [data-key="${key}"]`);
+      data[key] = el ? (el.value || '').trim() : '';
     });
     annotationData = { ...data };
 
@@ -297,9 +297,12 @@
         setSaveIndicator('saved');
         if (manual) {
           setSaveStatus('✓ 保存成功');
-          if (resp.newRisks && resp.newRisks.length > 0) {
+          const newCount = resp.newRisks ? resp.newRisks.length : 0;
+          const updatedCount = resp.updatedRisks ? resp.updatedRisks.length : 0;
+          const total = newCount + updatedCount;
+          if (total > 0) {
             setTimeout(() => {
-              setSaveStatus(`✓ 保存成功，检测到 ${resp.newRisks.length} 项风险`);
+              setSaveStatus(`✓ 保存成功，共 ${total} 项风险`);
             }, 500);
           }
         }

@@ -181,11 +181,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           await setState({ communications: state.communications });
           if (comm.appointmentTime) {
             const apptTime = new Date(comm.appointmentTime).getTime();
-            addAutoReminder({
-              type: 'appointment',
-              title: '看房提醒',
-              content: `您预约了 ${new Date(comm.appointmentTime).toLocaleString()} 看房，请提前做好准备`,
-              remindAt: apptTime - 3600000
+            await addAutoAppointmentReminder({
+              favoriteId: comm.favoriteId,
+              communicationId: comm.id,
+              appointmentTime: apptTime
             });
           }
           sendResponse({ success: true, data: comm });
@@ -195,8 +194,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const state = await getState();
           const idx = state.communications.findIndex(c => c.id === message.id);
           if (idx >= 0) {
+            const oldComm = state.communications[idx];
+            const oldTime = oldComm.appointmentTime ? new Date(oldComm.appointmentTime).getTime() : null;
             state.communications[idx] = { ...state.communications[idx], ...message.data, updatedAt: Date.now() };
             await setState({ communications: state.communications });
+            
+            const newTime = message.data.appointmentTime !== undefined 
+              ? (message.data.appointmentTime ? new Date(message.data.appointmentTime).getTime() : null)
+              : oldTime;
+            
+            if (oldTime !== newTime) {
+              const oldReminderIdx = state.reminders.findIndex(r => 
+                r.type === 'appointment' && r.communicationId === message.id && !r.triggered
+              );
+              if (oldReminderIdx >= 0) {
+                const oldId = state.reminders[oldReminderIdx].id;
+                chrome.alarms.clear(`reminder_${oldId}`);
+                state.reminders.splice(oldReminderIdx, 1);
+              }
+              
+              if (newTime) {
+                await addAutoAppointmentReminder({
+                  favoriteId: state.communications[idx].favoriteId,
+                  communicationId: message.id,
+                  appointmentTime: newTime
+                });
+              }
+              
+              if (oldReminderIdx >= 0 || newTime) {
+                await setState({ reminders: state.reminders });
+              }
+            }
             sendResponse({ success: true, data: state.communications[idx] });
           } else {
             sendResponse({ success: false });
@@ -205,8 +233,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         case 'deleteCommunication': {
           const state = await getState();
+          const comm = state.communications.find(c => c.id === message.id);
           state.communications = state.communications.filter(c => c.id !== message.id);
-          await setState({ communications: state.communications });
+          
+          const relatedReminders = state.reminders.filter(r => r.communicationId === message.id && !r.triggered);
+          relatedReminders.forEach(r => {
+            chrome.alarms.clear(`reminder_${r.id}`);
+          });
+          state.reminders = state.reminders.filter(r => r.communicationId !== message.id || r.triggered);
+          
+          await setState({ 
+            communications: state.communications,
+            reminders: state.reminders
+          });
           sendResponse({ success: true });
           break;
         }
@@ -250,13 +289,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'saveAnnotation': {
           const state = await getState();
           const url = normalizeUrl(message.url);
-          if (!state.annotations[url]) {
-            state.annotations[url] = {};
-          }
-          state.annotations[url] = { ...state.annotations[url], ...message.data, updatedAt: Date.now() };
+          const fullData = { ...message.data, updatedAt: Date.now() };
+          state.annotations[url] = fullData;
           await setState({ annotations: state.annotations });
-          const newRisks = await autoCheckRisks(url, state.annotations[url]);
-          sendResponse({ success: true, newRisks });
+          const result = await autoCheckRisks(url, fullData);
+          sendResponse({ success: true, ...result });
           break;
         }
         case 'getAnnotation': {
@@ -283,6 +320,30 @@ async function addAutoReminder(reminderData) {
   state.reminders.push(reminder);
   await setState({ reminders: state.reminders });
   scheduleReminder(reminder);
+}
+
+async function addAutoAppointmentReminder({ favoriteId, communicationId, appointmentTime }) {
+  const state = await getState();
+  const remindTime = appointmentTime - 3600000;
+  if (remindTime <= Date.now()) return;
+  
+  const reminder = {
+    id: generateId(),
+    type: 'appointment',
+    title: '约看提醒',
+    content: `您预约了 ${new Date(appointmentTime).toLocaleString()} 看房，请提前做好准备`,
+    remindAt: remindTime,
+    triggerTime: appointmentTime,
+    favoriteId,
+    communicationId,
+    autoGenerated: true,
+    createdAt: Date.now(),
+    triggered: false
+  };
+  state.reminders.push(reminder);
+  await setState({ reminders: state.reminders });
+  scheduleReminder(reminder);
+  return reminder;
 }
 
 function scheduleReminder(reminder) {
@@ -362,91 +423,63 @@ function extractNumbers(text) {
 
 async function autoCheckRisks(url, annotation) {
   const state = await getState();
-  const existingRisks = state.risks.filter(r => r.url === url);
-  const existingTypes = new Set(existingRisks.filter(r => !r.resolved).map(r => r.type));
-  const newRisks = [];
+  const existingRisks = state.risks.filter(r => r.url === url && !r.resolved);
+  const existingMap = {};
+  existingRisks.forEach(r => { existingMap[r.type] = r; });
+
+  const triggers = {};
+
+  function addTrigger(type, field, detail) {
+    if (!triggers[type]) {
+      triggers[type] = { type, sources: [], details: [] };
+    }
+    triggers[type].sources.push(field);
+    if (detail) triggers[type].details.push(detail);
+  }
 
   if (annotation.price) {
     const price = extractPrice(annotation.price);
     if (price && price > 0 && price < 800) {
-      if (!existingTypes.has('low_price')) {
-        const risk = {
-          type: 'low_price',
-          title: '价格异常偏低',
-          description: `该房源价格约 ${price} 元/月，明显低于市场水平，需警惕虚假房源或诈骗陷阱`,
-          level: 'high',
-          url
-        };
-        state.risks.push({ id: generateId(), createdAt: Date.now(), resolved: false, ...risk });
-        newRisks.push(risk);
-      }
+      addTrigger('low_price', '租金价格', `价格约 ${price} 元/月，明显偏低`);
     }
   }
 
   if (annotation.deposit) {
     const deposit = annotation.deposit;
-    const hasRiskKeywords = [
+    const dLower = deposit.toLowerCase();
+    const advanceKeywords = [
       '提前转账', '提前付款', '预先支付', '先转', '先打款',
       '预付定金', '预付押金', '预付房租', '预付租金',
-      '年付', '半年付', '一次性付清', '一次性支付',
-      '押二', '押三', '押四', '押五', '押六'
+      '年付', '半年付', '一次性付清', '一次性支付'
     ];
     
-    let hasAdvanceTransfer = false;
-    const dLower = deposit.toLowerCase();
-    
-    hasRiskKeywords.forEach(kw => {
-      if (dLower.includes(kw.toLowerCase())) hasAdvanceTransfer = true;
+    let hasAdvance = false;
+    advanceKeywords.forEach(kw => {
+      if (dLower.includes(kw.toLowerCase())) hasAdvance = true;
     });
     
-    if (hasAdvanceTransfer && !existingTypes.has('advance_transfer')) {
-      const risk = {
-        type: 'advance_transfer',
-        title: '要求提前转账',
-        description: `付款方式「${deposit}」涉及提前转账或预付大笔费用，存在诈骗风险，请务必核实房东身份后再付款`,
-        level: 'high',
-        url
-      };
-      state.risks.push({ id: generateId(), createdAt: Date.now(), resolved: false, ...risk });
-      newRisks.push(risk);
+    if (hasAdvance) {
+      addTrigger('advance_transfer', '押金/付款方式', `付款方式「${deposit}」涉及提前付款`);
     }
     
-    if ((dLower.includes('年付') || dLower.includes('半年付') || /押[二三四五六七八九十]/.test(deposit)) 
-        && !existingTypes.has('unusual_deposit')) {
-      const risk = {
-        type: 'unusual_deposit',
-        title: '押金/付款方式异常',
-        description: `付款方式「${deposit}」较为少见或押金比例偏高，建议谨慎处理`,
-        level: 'medium',
-        url
-      };
-      state.risks.push({ id: generateId(), createdAt: Date.now(), resolved: false, ...risk });
-      newRisks.push(risk);
+    if (/押[二三四五六七八九十]/.test(deposit)) {
+      addTrigger('unusual_deposit', '押金/付款方式', `押金比例偏高：${deposit.match(/押[二三四五六七八九十]/)[0]}`);
     }
   }
 
   if (annotation.paymentCycle) {
     const cycle = annotation.paymentCycle.toLowerCase();
-    if ((cycle.includes('年付') || cycle.includes('半年付') || cycle.includes('一次性'))
-        && !existingTypes.has('advance_transfer')) {
-      const risk = {
-        type: 'advance_transfer',
-        title: '要求提前转账',
-        description: `付款周期「${annotation.paymentCycle}」需要一次性支付大笔费用，请谨慎核实后再付款`,
-        level: 'high',
-        url
-      };
-      state.risks.push({ id: generateId(), createdAt: Date.now(), resolved: false, ...risk });
-      newRisks.push(risk);
+    if (cycle.includes('年付') || cycle.includes('半年付') || cycle.includes('一次性')) {
+      addTrigger('advance_transfer', '付款周期', `付款周期「${annotation.paymentCycle}」需一次性支付`);
     }
   }
 
   if (annotation.viewingMethod) {
     const method = annotation.viewingMethod.toLowerCase();
     const refuseKeywords = [
-      '拒绝', '不同意', '不方便', '不能看房', '不给看房',
-      '视频代替', '只看视频', '线上看房', '不用看房',
-      '人在外地', '暂时不在', '没法带看', '无法看房'
+      '拒绝', '不同意', '不方便看房', '不能看房', '不给看房',
+      '视频代替', '只看视频', '线上看房代替', '不用看房',
+      '人在外地', '暂时不在本地', '没法带看', '无法看房'
     ];
     
     let isRefuse = false;
@@ -454,45 +487,19 @@ async function autoCheckRisks(url, annotation) {
       if (method.includes(kw)) isRefuse = true;
     });
     
-    if (isRefuse && !existingTypes.has('refuse_viewing')) {
-      const risk = {
-        type: 'refuse_viewing',
-        title: '拒绝实地看房',
-        description: '对方拒绝实地看房，可能是虚假房源或诈骗，请坚持实地看房后再考虑',
-        level: 'high',
-        url
-      };
-      state.risks.push({ id: generateId(), createdAt: Date.now(), resolved: false, ...risk });
-      newRisks.push(risk);
+    if (isRefuse) {
+      addTrigger('refuse_viewing', '看房方式', `看房方式「${annotation.viewingMethod}」，拒绝实地看房`);
     }
   }
 
   if (annotation.landlordIdentity) {
     const identity = annotation.landlordIdentity.toLowerCase();
-    if (identity.includes('二房东') && !identity.includes('授权') && !existingTypes.has('sublessor')) {
-      const risk = {
-        type: 'sublessor',
-        title: '二房东风险',
-        description: '对方为二房东，请务必确认是否有房东书面授权，以及原始租赁合同剩余租期',
-        level: 'medium',
-        url
-      };
-      state.risks.push({ id: generateId(), createdAt: Date.now(), resolved: false, ...risk });
-      newRisks.push(risk);
+    if (identity.includes('二房东') && !identity.includes('授权')) {
+      addTrigger('sublessor', '房东身份', '对方为二房东，未提及有房东授权');
     }
-    
-    if ((identity.includes('不确定') || identity.includes('不清楚') || identity.includes('不知道')
-         || identity.includes('无法确认') || identity.includes('身份不明'))
-        && !existingTypes.has('identity_unknown')) {
-      const risk = {
-        type: 'identity_unknown',
-        title: '房东身份不明',
-        description: '无法确认房东身份，建议要求查看房产证和身份证原件',
-        level: 'medium',
-        url
-      };
-      state.risks.push({ id: generateId(), createdAt: Date.now(), resolved: false, ...risk });
-      newRisks.push(risk);
+    if (identity.includes('不确定') || identity.includes('不清楚') || identity.includes('不知道')
+         || identity.includes('无法确认') || identity.includes('身份不明')) {
+      addTrigger('identity_unknown', '房东身份', '房东身份无法确认');
     }
   }
 
@@ -507,21 +514,17 @@ async function autoCheckRisks(url, annotation) {
     ];
     
     let hasMissing = false;
+    const missingItems = [];
     const tLower = terms.toLowerCase();
     missingKeywords.forEach(kw => {
-      if (tLower.includes(kw.toLowerCase())) hasMissing = true;
+      if (tLower.includes(kw.toLowerCase())) {
+        hasMissing = true;
+        missingItems.push(kw);
+      }
     });
     
-    if (hasMissing && !existingTypes.has('contract_missing')) {
-      const risk = {
-        type: 'contract_missing',
-        title: '合同条款缺失',
-        description: '合同可能缺少关键条款，请务必确认租期、押金退还、违约责任等重要条款',
-        level: 'medium',
-        url
-      };
-      state.risks.push({ id: generateId(), createdAt: Date.now(), resolved: false, ...risk });
-      newRisks.push(risk);
+    if (hasMissing) {
+      addTrigger('contract_missing', '合同条款', `发现以下问题：${missingItems.slice(0, 3).join('、')}${missingItems.length > 3 ? '等' : ''}`);
     }
   }
 
@@ -548,27 +551,61 @@ async function autoCheckRisks(url, annotation) {
       }
     }
     
-    if (conflictSigns.length > 0 && !existingTypes.has('info_conflict')) {
+    if (conflictSigns.length > 0) {
+      addTrigger('info_conflict', '综合信息', `信息矛盾点：${conflictSigns.join('、')}`);
+    }
+  }
+
+  const newRisks = [];
+  const updatedRisks = [];
+
+  for (const type in triggers) {
+    const trigger = triggers[type];
+    const riskDef = RISK_DEFS[type] || { title: type, level: 'medium' };
+    const sourcesText = trigger.sources.length > 0 ? `触发来源：${trigger.sources.join('、')}` : '';
+    const detailsText = trigger.details.length > 0 ? `\n具体情况：\n${trigger.details.map((d, i) => `${i + 1}. ${d}`).join('\n')}` : '';
+    const fullDescription = riskDef.description + (sourcesText || detailsText ? `\n\n${sourcesText}${detailsText}` : '');
+
+    if (existingMap[type]) {
+      const existing = existingMap[type];
+      const idx = state.risks.findIndex(r => r.id === existing.id);
+      if (idx >= 0) {
+        state.risks[idx] = { 
+          ...state.risks[idx], 
+          description: fullDescription,
+          sources: trigger.sources,
+          details: trigger.details,
+          updatedAt: Date.now()
+        };
+        updatedRisks.push(state.risks[idx]);
+      }
+    } else {
       const risk = {
-        type: 'info_conflict',
-        title: '房源信息矛盾',
-        description: `房源信息存在矛盾点：${conflictSigns.join('、')}，请仔细核实房源真实性`,
-        level: 'medium',
-        url
+        id: generateId(),
+        type,
+        title: riskDef.title,
+        description: fullDescription,
+        level: riskDef.level,
+        url,
+        sources: trigger.sources,
+        details: trigger.details,
+        createdAt: Date.now(),
+        resolved: false,
+        autoGenerated: true
       };
-      state.risks.push({ id: generateId(), createdAt: Date.now(), resolved: false, ...risk });
+      state.risks.push(risk);
       newRisks.push(risk);
     }
   }
 
-  if (newRisks.length > 0) {
+  if (newRisks.length > 0 || updatedRisks.length > 0) {
     await setState({ risks: state.risks });
     newRisks.forEach(risk => {
-      sendNotification('租房风险提醒', risk.description);
+      sendNotification('租房风险提醒', risk.title + '：' + (risk.details && risk.details[0] ? risk.details[0] : risk.description.substring(0, 50)));
     });
   }
 
-  return newRisks;
+  return { newRisks, updatedRisks, totalTriggers: Object.keys(triggers).length };
 }
 
 chrome.notifications.onClicked.addListener(() => {
