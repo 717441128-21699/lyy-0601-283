@@ -164,11 +164,56 @@
 .rental-hint {
   font-size: 12px;
   color: #888;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
   padding: 8px 12px;
   background: #f7f8ff;
   border-radius: 8px;
   border-left: 3px solid #667eea;
+}
+
+.rental-save-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  margin-bottom: 12px;
+  background: #f0f7ff;
+  border-radius: 6px;
+  font-size: 11px;
+  color: #667eea;
+}
+
+.rental-save-indicator .save-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #667eea;
+  animation: pulse 1.5s infinite;
+}
+
+.rental-save-indicator.save-saved .save-dot {
+  background: #2ed573;
+  animation: none;
+}
+
+.rental-save-indicator.save-saved {
+  background: #f0fff4;
+  color: #2ed573;
+}
+
+.rental-save-indicator.save-error .save-dot {
+  background: #ff4757;
+  animation: none;
+}
+
+.rental-save-indicator.save-error {
+  background: #fff5f5;
+  color: #ff4757;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 
 .rental-field {

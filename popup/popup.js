@@ -6,6 +6,8 @@ let state = {
   filters: {
     city: '',
     status: '',
+    budget: '',
+    commute: '',
     riskLevel: '',
     showResolved: false,
     commFavId: '',
@@ -120,16 +122,74 @@ function formatDate(ts) {
   return `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
+function extractPriceValue(text) {
+  if (!text) return null;
+  const nums = text.match(/\d+(?:\.\d+)?/g);
+  if (!nums || nums.length === 0) return null;
+  if (nums.length >= 2) {
+    return (parseFloat(nums[0]) + parseFloat(nums[1])) / 2;
+  }
+  return parseFloat(nums[0]);
+}
+
+function extractCommuteMinutes(text) {
+  if (!text) return null;
+  const hoursMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:小时|h|时|钟头)/i);
+  const minsMatch = text.match(/(\d+(?:\.\d+)?)\s*(?:分钟|分|min|m)/i);
+  
+  let total = 0;
+  let hasValue = false;
+  
+  if (hoursMatch) {
+    total += parseFloat(hoursMatch[1]) * 60;
+    hasValue = true;
+  }
+  if (minsMatch) {
+    total += parseFloat(minsMatch[1]);
+    hasValue = true;
+  }
+  
+  if (!hasValue) {
+    const pureNum = parseFloat(text);
+    if (!isNaN(pureNum) && pureNum > 0 && pureNum < 200) {
+      return pureNum;
+    }
+    return null;
+  }
+  
+  return total > 0 ? total : null;
+}
+
+function isInRange(value, rangeStr) {
+  if (!rangeStr || value == null) return true;
+  const parts = rangeStr.split('-').map(Number);
+  if (parts.length !== 2) return true;
+  return value >= parts[0] && value < parts[1];
+}
+
 function renderFavorites() {
   const grid = document.getElementById('favoritesGrid');
   const empty = document.getElementById('emptyFavorites');
   
   let filtered = state.favorites;
+  
   if (state.filters.city) {
     filtered = filtered.filter(f => f.city === state.filters.city);
   }
   if (state.filters.status) {
     filtered = filtered.filter(f => f.status === state.filters.status);
+  }
+  if (state.filters.budget) {
+    filtered = filtered.filter(f => {
+      const budgetVal = extractPriceValue(f.budget);
+      return isInRange(budgetVal, state.filters.budget);
+    });
+  }
+  if (state.filters.commute) {
+    filtered = filtered.filter(f => {
+      const commuteVal = extractCommuteMinutes(f.commute);
+      return isInRange(commuteVal, state.filters.commute);
+    });
   }
 
   if (filtered.length === 0) {
@@ -665,6 +725,14 @@ function bindEvents() {
   });
   document.getElementById('filterStatus').addEventListener('change', (e) => {
     state.filters.status = e.target.value;
+    renderFavorites();
+  });
+  document.getElementById('filterBudget').addEventListener('change', (e) => {
+    state.filters.budget = e.target.value;
+    renderFavorites();
+  });
+  document.getElementById('filterCommute').addEventListener('change', (e) => {
+    state.filters.commute = e.target.value;
     renderFavorites();
   });
   document.getElementById('filterRiskLevel').addEventListener('change', (e) => {

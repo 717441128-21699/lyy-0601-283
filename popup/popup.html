@@ -43,7 +43,7 @@
 
     <main class="app-content">
       <section class="tab-panel active" data-panel="favorites">
-        <div class="panel-toolbar">
+        <div class="panel-toolbar fav-toolbar">
           <div class="filter-group">
             <select id="filterCity">
               <option value="">全部城市</option>
@@ -58,9 +58,33 @@
               <option value="已放弃">已放弃</option>
             </select>
           </div>
-          <button class="btn btn-primary" id="btnAddFavorite">
-            <span>+</span> 新增房源
+          <button class="btn btn-primary btn-sm" id="btnAddFavorite">
+            <span>+</span> 新增
           </button>
+        </div>
+        <div class="filter-row">
+          <div class="filter-item">
+            <span class="filter-label">预算</span>
+            <select id="filterBudget">
+              <option value="">全部预算</option>
+              <option value="0-1500">1500元以下</option>
+              <option value="1500-2500">1500-2500元</option>
+              <option value="2500-4000">2500-4000元</option>
+              <option value="4000-6000">4000-6000元</option>
+              <option value="6000-99999">6000元以上</option>
+            </select>
+          </div>
+          <div class="filter-item">
+            <span class="filter-label">通勤</span>
+            <select id="filterCommute">
+              <option value="">全部通勤</option>
+              <option value="0-15">15分钟以内</option>
+              <option value="15-30">15-30分钟</option>
+              <option value="30-45">30-45分钟</option>
+              <option value="45-60">45分钟-1小时</option>
+              <option value="60-9999">1小时以上</option>
+            </select>
+          </div>
         </div>
         <div class="favorites-grid" id="favoritesGrid"></div>
         <div class="empty-state" id="emptyFavorites" style="display:none">

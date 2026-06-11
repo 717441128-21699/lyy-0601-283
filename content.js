@@ -4,6 +4,9 @@
   let currentUrl = location.href;
   let panelVisible = false;
   let annotationData = {};
+  let isSaving = false;
+  let saveTimeout = null;
+  let panelInitialized = false;
 
   const ANNOTATION_FIELDS = [
     { key: 'price', label: '租金价格', placeholder: '例如：3000 元/月', type: 'text' },
@@ -14,6 +17,21 @@
     { key: 'viewingMethod', label: '看房方式', placeholder: '例如：随时看房、预约看房、拒绝看房', type: 'text' },
     { key: 'contractTerms', label: '合同条款备注', placeholder: '记录重要合同条款，如：最短租期、违约金等', type: 'textarea' }
   ];
+
+  function normalizeUrl(url) {
+    try {
+      const u = new URL(url);
+      let pathname = u.pathname;
+      if (pathname.endsWith('/')) pathname = pathname.slice(0, -1);
+      return u.origin + pathname;
+    } catch {
+      return url;
+    }
+  }
+
+  function getCurrentUrl() {
+    return normalizeUrl(location.href);
+  }
 
   function createFloatingButton() {
     if (document.getElementById('rental-check-fab')) return;
@@ -32,7 +50,9 @@
   }
 
   function createPanel() {
-    if (document.getElementById('rental-check-panel')) return;
+    if (document.getElementById('rental-check-panel')) {
+      return document.getElementById('rental-check-panel');
+    }
 
     const panel = document.createElement('div');
     panel.id = 'rental-check-panel';
@@ -58,7 +78,7 @@
     panel.innerHTML = `
       <div class="rental-panel-header">
         <span class="rental-panel-title">🏠 租房风险检查</span>
-        <button class="rental-panel-close" id="rental-panel-close">×</button>
+        <button class="rental-panel-close" id="rental-panel-close" aria-label="关闭">×</button>
       </div>
       <div class="rental-panel-tabs">
         <button class="rental-tab active" data-tab="annotate">页面标注</button>
@@ -68,9 +88,13 @@
       <div class="rental-panel-content">
         <div class="rental-tab-panel active" data-panel="annotate">
           <div class="rental-hint">标记当前房源的关键信息，系统将自动检测风险</div>
+          <div class="rental-save-indicator" id="rental-save-indicator">
+            <span class="save-dot"></span>
+            <span class="save-text">自动保存中</span>
+          </div>
           ${fieldsHtml}
           <div class="rental-actions">
-            <button class="rental-btn rental-btn-primary" id="rental-save-annotation">保存标注</button>
+            <button class="rental-btn rental-btn-primary" id="rental-save-annotation">立即保存</button>
             <button class="rental-btn" id="rental-clear-annotation">清空</button>
           </div>
         </div>
@@ -147,12 +171,23 @@
 
     document.body.appendChild(panel);
     bindPanelEvents();
-    loadAnnotationData();
-    loadRisksForPage();
+    panelInitialized = true;
+    
+    loadAnnotationData().then(() => {
+      loadRisksForPage();
+    });
+    
+    return panel;
   }
 
   function bindPanelEvents() {
-    document.getElementById('rental-panel-close').addEventListener('click', togglePanel);
+    const closeBtn = document.getElementById('rental-panel-close');
+    if (closeBtn) {
+      closeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        hidePanel();
+      });
+    }
 
     document.querySelectorAll('.rental-tab').forEach(tab => {
       tab.addEventListener('click', () => {
@@ -163,24 +198,72 @@
       });
     });
 
-    document.getElementById('rental-save-annotation').addEventListener('click', saveAnnotation);
-    document.getElementById('rental-clear-annotation').addEventListener('click', clearAnnotation);
-    document.getElementById('rental-report-risks').addEventListener('click', reportQuickRisks);
-    document.getElementById('rental-add-favorite').addEventListener('click', addFavorite);
+    const saveBtn = document.getElementById('rental-save-annotation');
+    if (saveBtn) {
+      saveBtn.addEventListener('click', () => saveAnnotation(true));
+    }
 
-    document.querySelector('#rental-panel-content [data-panel="annotate"]').addEventListener('input', () => {
-      setSaveStatus('');
-    });
+    const clearBtn = document.getElementById('rental-clear-annotation');
+    if (clearBtn) {
+      clearBtn.addEventListener('click', clearAnnotation);
+    }
+
+    const reportBtn = document.getElementById('rental-report-risks');
+    if (reportBtn) {
+      reportBtn.addEventListener('click', reportQuickRisks);
+    }
+
+    const addFavBtn = document.getElementById('rental-add-favorite');
+    if (addFavBtn) {
+      addFavBtn.addEventListener('click', addFavorite);
+    }
+
+    const annotatePanel = document.querySelector('[data-panel="annotate"]');
+    if (annotatePanel) {
+      annotatePanel.addEventListener('input', (e) => {
+        if (e.target.matches('[data-key]')) {
+          setSaveStatus('');
+          scheduleAutoSave();
+        }
+      });
+    }
+  }
+
+  function scheduleAutoSave() {
+    if (saveTimeout) clearTimeout(saveTimeout);
+    setSaveIndicator('saving');
+    saveTimeout = setTimeout(() => {
+      saveAnnotation(false);
+    }, 800);
+  }
+
+  function setSaveIndicator(state) {
+    const indicator = document.getElementById('rental-save-indicator');
+    if (!indicator) return;
+    
+    indicator.className = 'rental-save-indicator save-' + state;
+    const text = indicator.querySelector('.save-text');
+    if (text) {
+      const texts = {
+        saving: '正在保存...',
+        saved: '已保存',
+        error: '保存失败'
+      };
+      text.textContent = texts[state] || '';
+    }
   }
 
   async function loadAnnotationData() {
+    const url = getCurrentUrl();
     try {
-      const resp = await chrome.runtime.sendMessage({ action: 'getAnnotation', url: currentUrl });
+      const resp = await chrome.runtime.sendMessage({ action: 'getAnnotation', url });
       if (resp && resp.success && resp.data) {
-        annotationData = resp.data;
+        annotationData = { ...resp.data };
         Object.keys(annotationData).forEach(key => {
           const el = document.querySelector(`.rental-tab-panel[data-panel="annotate"] [data-key="${key}"]`);
-          if (el) el.value = annotationData[key];
+          if (el && annotationData[key]) {
+            el.value = annotationData[key];
+          }
         });
       }
     } catch (e) {
@@ -194,35 +277,61 @@
     }
   }
 
-  async function saveAnnotation() {
+  async function saveAnnotation(manual = false) {
+    if (isSaving) return;
+    isSaving = true;
+
     const data = {};
     document.querySelectorAll('.rental-tab-panel[data-panel="annotate"] [data-key]').forEach(el => {
-      if (el.value.trim()) {
+      if (el.value && el.value.trim()) {
         data[el.dataset.key] = el.value.trim();
       }
     });
-    annotationData = data;
+    annotationData = { ...data };
+
+    const url = getCurrentUrl();
 
     try {
-      await chrome.runtime.sendMessage({ action: 'saveAnnotation', url: currentUrl, data });
-      setSaveStatus('✓ 已保存，正在检测风险...');
-      setTimeout(() => setSaveStatus('✓ 保存成功'), 1500);
+      const resp = await chrome.runtime.sendMessage({ action: 'saveAnnotation', url, data });
+      if (resp && resp.success) {
+        setSaveIndicator('saved');
+        if (manual) {
+          setSaveStatus('✓ 保存成功');
+          if (resp.newRisks && resp.newRisks.length > 0) {
+            setTimeout(() => {
+              setSaveStatus(`✓ 保存成功，检测到 ${resp.newRisks.length} 项风险`);
+            }, 500);
+          }
+        }
+        updateRiskBadge();
+      } else {
+        setSaveIndicator('error');
+        if (manual) setSaveStatus('✗ 保存失败');
+      }
     } catch (e) {
-      setSaveStatus('✗ 保存失败');
+      setSaveIndicator('error');
+      if (manual) setSaveStatus('✗ 保存失败');
+      console.error('保存标注失败:', e);
+    } finally {
+      isSaving = false;
+      setTimeout(() => setSaveIndicator('saved'), 1000);
     }
   }
 
   function clearAnnotation() {
-    document.querySelectorAll('.rental-tab-panel[data-panel="annotate"] [data-key]').forEach(el => {
-      el.value = '';
-    });
-    annotationData = {};
-    setSaveStatus('');
+    if (confirm('确定要清空所有标注内容吗？')) {
+      document.querySelectorAll('.rental-tab-panel[data-panel="annotate"] [data-key]').forEach(el => {
+        el.value = '';
+      });
+      annotationData = {};
+      setSaveStatus('');
+      saveAnnotation(false);
+    }
   }
 
   async function reportQuickRisks() {
     const riskMap = {
-      low_price: { title: '价格异常偏低', description: '该房源价格明显低于市场价，可能存在虚假信息', level: 'high' },
+      low_price: { title: '价格异常偏低', description: '该房源价格明显低于市场价，可能存在虚假信息或诈骗陷阱', level: 'high' },
       advance_transfer: { title: '要求提前转账', description: '对方要求提前转账或预付大额定金，存在诈骗风险', level: 'high' },
       refuse_viewing: { title: '拒绝实地看房', description: '对方以各种理由拒绝实地看房，存在较大风险', level: 'high' },
       info_conflict: { title: '房源信息矛盾', description: '房源描述前后不一致，或与实际沟通有明显出入', level: 'medium' },
@@ -236,23 +345,31 @@
       return;
     }
 
+    const url = getCurrentUrl();
     let added = 0;
     for (const cb of checked) {
       const riskDef = riskMap[cb.dataset.risk];
       if (riskDef) {
         try {
-          await chrome.runtime.sendMessage({
+          const resp = await chrome.runtime.sendMessage({
             action: 'addRisk',
-            data: { ...riskDef, url: currentUrl, type: cb.dataset.risk }
+            data: { ...riskDef, url, type: cb.dataset.risk }
           });
-          added++;
+          if (resp && resp.success && !resp.duplicate) {
+            added++;
+          }
           cb.checked = false;
         } catch (e) {
           console.error('添加风险失败:', e);
         }
       }
     }
-    setSaveStatus(`✓ 已记录 ${added} 条风险`);
+    
+    if (added > 0) {
+      setSaveStatus(`✓ 新增 ${added} 条风险记录`);
+    } else {
+      setSaveStatus('风险已存在，未重复添加');
+    }
     updateRiskBadge();
   }
 
@@ -263,7 +380,7 @@
       budget: document.getElementById('rental-fav-budget').value.trim(),
       commute: document.getElementById('rental-fav-commute').value.trim(),
       status: document.getElementById('rental-fav-status').value,
-      url: currentUrl
+      url: getCurrentUrl()
     };
 
     if (!data.title) {
@@ -274,30 +391,47 @@
     try {
       await chrome.runtime.sendMessage({ action: 'addFavorite', data });
       setSaveStatus('✓ 收藏成功');
-      document.getElementById('rental-fav-title').value = '';
-      document.getElementById('rental-fav-city').value = '';
-      document.getElementById('rental-fav-budget').value = '';
-      document.getElementById('rental-fav-commute').value = '';
+      setTimeout(() => {
+        document.getElementById('rental-fav-title').value = '';
+        document.getElementById('rental-fav-city').value = '';
+        document.getElementById('rental-fav-budget').value = '';
+        document.getElementById('rental-fav-commute').value = '';
+      }, 1000);
     } catch (e) {
       setSaveStatus('✗ 收藏失败');
+      console.error('收藏失败:', e);
     }
   }
 
   async function loadRisksForPage() {
+    const url = getCurrentUrl();
     try {
       const resp = await chrome.runtime.sendMessage({ action: 'getState' });
       if (resp && resp.success) {
-        const pageRisks = resp.data.risks.filter(r => r.url === currentUrl && !r.resolved);
+        const pageRisks = resp.data.risks.filter(r => {
+          if (!r.url) return false;
+          try {
+            return normalizeUrl(r.url) === url && !r.resolved;
+          } catch {
+            return r.url === url && !r.resolved;
+          }
+        });
         const badge = document.getElementById('rental-risk-badge');
-        if (badge && pageRisks.length > 0) {
-          badge.style.display = 'flex';
-          badge.textContent = pageRisks.length > 9 ? '9+' : pageRisks.length;
+        if (badge) {
+          if (pageRisks.length > 0) {
+            badge.style.display = 'flex';
+            badge.textContent = pageRisks.length > 9 ? '9+' : pageRisks.length;
+          } else {
+            badge.style.display = 'none';
+          }
         }
       }
-    } catch (e) {}
+    } catch (e) {
+      console.log('加载风险数据失败:', e);
+    }
   }
 
-  async function updateRiskBadge() {
+  function updateRiskBadge() {
     loadRisksForPage();
   }
 
@@ -306,21 +440,52 @@
     if (el) el.textContent = text;
   }
 
-  function togglePanel() {
+  function showPanel() {
     createPanel();
-    panelVisible = !panelVisible;
+    panelVisible = true;
     const panel = document.getElementById('rental-check-panel');
     const fab = document.getElementById('rental-check-fab');
-    if (panel) {
-      panel.classList.toggle('rental-visible', panelVisible);
-    }
-    if (fab) {
-      fab.classList.toggle('rental-active', panelVisible);
+    if (panel) panel.classList.add('rental-visible');
+    if (fab) fab.classList.add('rental-active');
+  }
+
+  function hidePanel() {
+    panelVisible = false;
+    const panel = document.getElementById('rental-check-panel');
+    const fab = document.getElementById('rental-check-fab');
+    if (panel) panel.classList.remove('rental-visible');
+    if (fab) fab.classList.remove('rental-active');
+  }
+
+  function togglePanel() {
+    if (panelVisible) {
+      hidePanel();
+    } else {
+      showPanel();
+      if (panelInitialized) {
+        loadAnnotationData();
+        loadRisksForPage();
+      }
     }
   }
 
+  let lastUrl = getCurrentUrl();
+  setInterval(() => {
+    const current = getCurrentUrl();
+    if (current !== lastUrl) {
+      lastUrl = current;
+      currentUrl = current;
+      if (panelInitialized && panelVisible) {
+        loadAnnotationData();
+        loadRisksForPage();
+      }
+    }
+  }, 2000);
+
   function init() {
-    createFloatingButton();
+    if (document.body) {
+      createFloatingButton();
+    }
   }
 
   if (document.readyState === 'loading') {
